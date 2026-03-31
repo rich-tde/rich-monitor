@@ -1,0 +1,3 @@
+[submodule "richio"]
+	path = richio
+	url = https://github.com/rich-tde/richio.git
