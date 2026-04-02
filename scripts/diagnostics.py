@@ -2,7 +2,6 @@
 """
 Automatic diagnostics for RICH TDE simulation snapshots.
 """
-#TODO: write a script that copies this from alice to mac, from mac to kiekpoel
 
 import glob
 import json
@@ -21,16 +20,26 @@ import richio
 
 app = typer.Typer()
 
-# ── Constants ─────────────────────────────────────────────────────────────────
-T_COMPTON    = 1e8    # K — Compton cooling threshold
-RHO_FLOOR    = 1e-19  # g/cm³ — density floor; cells below this are "fluff"
-RHO_VIZ_CUT  = 1e-18  # g/cm³ — cut for auto box-sizing
+# --------------------------------- Constants -------------------------------- #
+
+T_COMPTON    = 1e8    # K - Compton cooling threshold
+RHO_FLOOR    = 1e-19  # g/cm³ - density floor; cells below this are "fluff"
+RHO_VIZ_CUT  = 1e-18  # g/cm³ - cut for auto box-sizing
 CACHE_FNAME  = "diagnostics_cache.json"
+LOG_FNAME = "diagnostics.log"
 
-
-# ── Utilities ─────────────────────────────────────────────────────────────────
+# --------------------------------- Utilities -------------------------------- #
 
 def _snap_num(path: str) -> int:
+    """Extract the snapshot index from a file path.
+
+    Matches patterns ``snap_<N>.h5`` and ``snap_full_<N>.h5``.
+
+    :param path: File path of the snapshot.
+    :type path: str
+    :returns: Zero-based snapshot index, or ``-1`` if no match is found.
+    :rtype: int
+    """
     m = re.search(r"snap_(\d+)", path)
     if not m:
         m = re.search(r"snap_full_(\d+)", path)
@@ -38,20 +47,46 @@ def _snap_num(path: str) -> int:
 
 
 def _cell_mass(snap) -> u.unyt_array:
+    """Compute per-cell mass as density * volume.
+
+    :param snap: Loaded RICH snapshot object.
+    :returns: Per-cell mass array in grams.
+    :rtype: :class:`unyt.unyt_array`
+    """
     return (snap.density * snap.volume).to("g")
 
 
 def _fluff_mask(snap) -> np.ndarray:
-    """Background/floor cells: low density, negligible stellar content."""
+    """Boolean mask selecting background / density-floor cells.
+
+    A cell is considered *fluff* when its density is below :data:`RHO_FLOOR`
+    **and** its stellar-material tracer differs from unity by more than
+    ``1e-3`` (i.e. it carries negligible stellar content).
+
+    :param snap: Loaded RICH snapshot object.
+    :returns: Boolean array of shape ``(N,)``; ``True`` for fluff cells.
+    :rtype: :class:`numpy.ndarray`
+    """
     return (snap.density.to("g/cm**3").v < RHO_FLOOR) & (np.abs(snap.star - 1) > 1e-3)
 
 
 def _get_box(snap):
+    """Compute an axis-aligned bounding box for visualisation.
+
+    Cells with density above :data:`RHO_VIZ_CUT` define the extent; each
+    bound is then padded by 20 % outward so the domain boundary is never
+    clipped in slice / projection plots.
+
+    :param snap: Loaded RICH snapshot object.
+    :returns: Array ``[xlo, ylo, zlo, xhi, yhi, zhi]`` in the same length
+              units as the snapshot coordinates.
+    :rtype: :class:`unyt.unyt_array`
+    """
     mask = snap.density.to("g/cm**3").v > RHO_VIZ_CUT
     X, Y, Z = snap.X[mask], snap.Y[mask], snap.Z[mask]
     def pad(lo, hi):
-        lo = lo * (1.1 if lo < 0 else 0.9)
-        hi = hi * (1.1 if hi > 0 else 0.9)
+        lo = lo * (1.2 if lo < 0 else 0.8)
+        hi = hi * (1.2 if hi > 0 else 0.8)
         return lo, hi
     xlo, xhi = pad(X.min(), X.max())
     ylo, yhi = pad(Y.min(), Y.max())
@@ -60,12 +95,19 @@ def _get_box(snap):
 
 
 def _savefig(fig, path: str):
+    """Save a matplotlib figure to *path* and close it.
+
+    :param fig: Figure to save.
+    :type fig: :class:`matplotlib.figure.Figure`
+    :param path: Destination file path (extension determines format).
+    :type path: str
+    """
     fig.savefig(path, dpi=200, bbox_inches="tight")
     plt.close(fig)
     logger.success("Saved {}", path)
 
 
-# ── File integrity ─────────────────────────────────────────────────────────
+# ------------------------------ File integrity ------------------------------ #
 
 # Non-particle metadata fields: fixed sizes, not subject to the N-length check.
 _METADATA_KEYS = {"Box", "Cycle", "Time"}
@@ -73,7 +115,22 @@ _METADATA_KEYS = {"Box", "Cycle", "Time"}
 _KNOWN_ZERO    = {"Eg_0"}
 
 def integrity_check(snap_path: str) -> list[str]:
-    """All particle fields: same length N, no all-zero / NaN / Inf."""
+    """Validate particle fields in an HDF5 snapshot file.
+
+    Checks that:
+
+    * Every particle field has the same length *N*.
+    * No field (outside :data:`_KNOWN_ZERO`) is identically zero.
+    * No field contains ``NaN`` or ``Inf`` values.
+
+    Metadata keys in :data:`_METADATA_KEYS` (scalars such as ``Box``,
+    ``Cycle``, ``Time``) are skipped.
+
+    :param snap_path: Path to the ``.h5`` snapshot file.
+    :type snap_path: str
+    :returns: List of human-readable issue strings; empty if all fields pass.
+    :rtype: list[str]
+    """
     logger.info("Integrity check: {}", snap_path)
     issues = []
     n_ref = None                             # set once from first particle field
@@ -81,7 +138,7 @@ def integrity_check(snap_path: str) -> list[str]:
     snap = richio.load(snap_path)
     for key in snap.keys():
         if key in _METADATA_KEYS:
-            continue                         # scalars / metadata — skip
+            continue                         # scalars / metadata - skip
         arr = snap[key]
         if arr.ndim == 0:
             continue
@@ -103,9 +160,23 @@ def integrity_check(snap_path: str) -> list[str]:
     return issues
 
 
-# ── Slices & projections ───────────────────────────────────────────────────
+# --------------------------- Slices & projections --------------------------- #
 
 def slice_proj_check(snap, output_dir: str, snap_num: int):
+    """Generate mid-plane slice and column-projection plots.
+
+    Produces xy-plane slices of density, temperature, and dissipation, plus
+    column-density and dissipation projections.  Figures are written to
+    ``<output_dir>/figs/`` as PNG files named
+    ``<field>_slice_snap<NNNN>.png`` / ``<field>_proj_snap<NNNN>.png``.
+
+    :param snap: Loaded RICH snapshot object.
+    :param output_dir: Root output directory; a ``figs/`` sub-directory must
+                       already exist (or be created beforehand).
+    :type output_dir: str
+    :param snap_num: Snapshot index, used for output filenames.
+    :type snap_num: int
+    """
     logger.info("Slice & projection plots...")
     box = _get_box(snap)
     t_day = snap.time.to("day")
@@ -131,7 +202,7 @@ def slice_proj_check(snap, output_dir: str, snap_num: int):
             ax=ax, **kw,
         )
         plt.title(f"{field} slice {t_day:.2f}")
-        _savefig(fig, os.path.join(output_dir, f"{field}_slice_snap{snap_num:04d}.png"))
+        _savefig(fig, os.path.join(output_dir, f"figs/{field}_slice_snap{snap_num:04d}.png"))
 
     for field, kw in kwfield2proj.items():
         fig, ax = plt.subplots()
@@ -140,12 +211,25 @@ def slice_proj_check(snap, output_dir: str, snap_num: int):
             box_size=box, ax=ax, **kw
         )
         plt.title(f"{field} projection {t_day:.2f}")
-        _savefig(fig, os.path.join(output_dir, f"{field}_proj_snap{snap_num:04d}.png"))
+        _savefig(fig, os.path.join(output_dir, f"figs/{field}_proj_snap{snap_num:04d}.png"))
 
 
-# ── Resolution check ───────────────────────────────────────────────────────
+# ----------------------------- Resolution check ----------------------------- #
 
 def resolution_check(snap, output_dir: str, snap_num: int):
+    """Plot cell-size distributions (by count and by mass).
+
+    Uses the cube root of cell volume as a proxy for the smoothing length *h*
+    and produces a two-panel histogram (cell count and mass-weighted) saved to
+    ``<output_dir>/figs/resolution_check_snap<NNNN>.png``.  Summary statistics
+    (min / median / max *h*) are written to the log.
+
+    :param snap: Loaded RICH snapshot object.
+    :param output_dir: Root output directory.
+    :type output_dir: str
+    :param snap_num: Snapshot index, used for output filenames.
+    :type snap_num: int
+    """
     logger.info("Resolution check...")
     h    = snap.volume.v ** (1 / 3)   # cell-size proxy [cm]
     mass = _cell_mass(snap).v
@@ -172,13 +256,28 @@ def resolution_check(snap, output_dir: str, snap_num: int):
         "  h: min={:.3e}  median={:.3e}  max={:.3e}  [cm]",
         h.min(), np.median(h), h.max(),
     )
-    _savefig(fig, os.path.join(output_dir, f"resolution_check_snap{snap_num:04d}.png"))
+    _savefig(fig, os.path.join(output_dir, f"figs/resolution_check_snap{snap_num:04d}.png"))
 
 
-# ── Conservation & global energy budget ────────────────────────────────────
+# -------------------- Conservation & global energy budget ------------------- #
 
 def conservation_check(snap) -> dict:
-    """Total mass, kinetic / thermal / radiation energy, angular momentum."""
+    """Compute global conserved quantities for a single snapshot.
+
+    Calculates total mass, kinetic / thermal / radiation energy components,
+    and the three components of angular momentum.  Results are logged at INFO
+    level and returned as a plain dictionary for caching or further analysis.
+
+    :param snap: Loaded RICH snapshot object.
+    :returns: Dictionary with keys:
+
+              * ``M_tot_g`` - total mass [g]
+              * ``E_kin_erg`` - total kinetic energy [erg]
+              * ``E_thm_erg`` - total thermal energy [erg]
+              * ``E_rad_erg`` - total radiation energy [erg]
+              * ``Lx``, ``Ly``, ``Lz`` - angular-momentum components [g cm² s⁻¹]
+    :rtype: dict
+    """
     logger.info("Conservation / global budget...")
     mass = _cell_mass(snap)                              # [g]
     vx   = snap.Vx.to("cm/s");  vy = snap.Vy.to("cm/s");  vz = snap.Vz.to("cm/s")
@@ -208,26 +307,46 @@ def conservation_check(snap) -> dict:
     )
 
 
-# ── Compton cooling: hot-gas fraction ──────────────────────────────────────
+# --------------------- Compton cooling: hot-gas fraction -------------------- #
 
 def compton_check(snap) -> float:
-    """Mass fraction above T_COMPTON; should be small if Compton cooling works."""
+    """Compute the hot-gas mass fraction as a Compton-cooling diagnostic.
+
+    Sums the mass of all cells with temperature above :data:`T_COMPTON`
+    (10⁸ K) and divides by the total mass.  A fraction exceeding 5 % triggers
+    a logged warning indicating that Compton cooling may be ineffective.
+
+    :param snap: Loaded RICH snapshot object.
+    :returns: Hot-gas mass fraction ∈ [0, 1].
+    :rtype: float
+    """
     logger.info("Compton cooling check  (T > {:.0e} K)...", T_COMPTON)
     mass = _cell_mass(snap).v
     T    = snap.temperature.to("K").v
     frac = mass[T > T_COMPTON].sum() / mass.sum()
     logger.info("  Hot-gas mass fraction: {}  ({} %)", frac, frac * 100)
     if frac > 0.05:
-        logger.warning("  > 5 % — Compton cooling may not be effective!")
+        logger.warning("  > 5 % - Compton cooling may not be effective!")
     return float(frac)
 
 
-# ── Smoothing-length approximation check ───────────────────────────────────
+# ------------------- Smoothing-length approximation check ------------------- #
 
 def smoothing_check(snap) -> dict:
-    """
-    Mass and dissipation fraction in cells larger than the median cell size.
-    If small, the gradient/smoothing-length approximation is well-justified.
+    """Assess the validity of the smoothing-length approximation.
+
+    Computes the fractions of total mass and total dissipation residing in
+    cells whose size *h* (cube root of volume) exceeds the median cell size.
+    Small fractions indicate that most mass and energy dissipation occur in
+    well-resolved regions, justifying the gradient / smoothing-length
+    approximation used by RICH.
+
+    :param snap: Loaded RICH snapshot object.
+    :returns: Dictionary with keys:
+
+              * ``f_mass_large_h`` - mass fraction in cells with h > median h
+              * ``f_diss_large_h`` - dissipation fraction in cells with h > median h
+    :rtype: dict
     """
     logger.info("Smoothing-length approximation check...")
     h      = snap.volume.to("cm**3").v ** (1 / 3)
@@ -246,10 +365,23 @@ def smoothing_check(snap) -> dict:
     return dict(f_mass_large_h=float(f_mass), f_diss_large_h=float(f_diss))
 
 
-# ── Time-evolution: dissipation & fluff fraction ──────────────────────
+# --------------- Time-evolution: dissipation & fluff fraction --------------- #
 
 def _scalars_for_snap(snap_path: str) -> dict:
-    """Compute all time-series scalars for one snapshot (no plots)."""
+    """Extract all time-series scalar quantities from a single snapshot.
+
+    Loads the snapshot, computes conserved quantities and diagnostic fractions,
+    and returns them as plain Python floats suitable for JSON serialisation.
+    No figures are produced.
+
+    :param snap_path: Path to the ``.h5`` snapshot file.
+    :type snap_path: str
+    :returns: Dictionary with keys ``time_s``, ``M_tot_g``, ``E_kin_erg``,
+              ``E_thm_erg``, ``E_rad_erg``, ``Lx_cgs``, ``Ly_cgs``,
+              ``Lz_cgs``, ``diss_total_erg_s``, ``diss_fluff_frac``,
+              ``hot_mass_frac``.
+    :rtype: dict
+    """
     snap   = richio.load(snap_path)
     mass   = _cell_mass(snap).v
     vx     = snap.Vx.to("cm/s").v;  vy = snap.Vy.to("cm/s").v;  vz = snap.Vz.to("cm/s").v
@@ -273,9 +405,23 @@ def _scalars_for_snap(snap_path: str) -> dict:
 
 
 def time_evolution_check(snap_path: str, output_dir: str):
-    """
-    Build/update a JSON cache of per-snapshot scalars, then plot the time series.
-    Only processes snapshots not already in the cache.
+    """Build or update the scalar cache and produce time-evolution plots.
+
+    Scans the directory containing *snap_path* for all ``snap_*.h5`` files,
+    computes :func:`_scalars_for_snap` for any snapshot not yet in the JSON
+    cache (:data:`CACHE_FNAME`), and saves the updated cache.  Then generates
+    two multi-panel figures:
+
+    * ``time_evolution_physics.png`` - energy budget and total dissipation rate.
+    * ``time_evolution_numerics.png`` - mass conservation, fluff dissipation
+      fraction, and Compton cooling check.
+
+    :param snap_path: Path to any ``.h5`` snapshot in the run directory (used
+                      to locate sibling snapshots).
+    :type snap_path: str
+    :param output_dir: Root output directory; figures are written to the
+                       ``figs/`` sub-directory.
+    :type output_dir: str
     """
     logger.info("Time-evolution checks...")
     cache_path = os.path.join(output_dir, CACHE_FNAME)
@@ -298,7 +444,7 @@ def time_evolution_check(snap_path: str, output_dir: str):
         json.dump(cache, f, indent=2)
     logger.success("Cache saved: {}", cache_path)
 
-    # ── Plot all cached snapshots ────────────────────────────────────────────
+# ------------------------- Plot all cached snapshots ------------------------ #
     keys = sorted(cache.keys(), key=int)
     t    = np.array([cache[k]["time_s"]           for k in keys]) / 86400  # → days
     M    = np.array([cache[k]["M_tot_g"]          for k in keys])
@@ -314,7 +460,7 @@ def time_evolution_check(snap_path: str, output_dir: str):
 
     _tl = "Time [day]"
 
-    # ── Figure 1: physics ────────────────────────────────────────────────────
+# ----------------------------- Figure 1: physics ---------------------------- #
     fig1, ax1 = plt.subplots(2, 1, figsize=(8, 7), sharex=True,
                               constrained_layout=True)
 
@@ -332,9 +478,9 @@ def time_evolution_check(snap_path: str, output_dir: str):
     ax1[1].set_title("Total dissipation rate")
     ax1[1].set_xlabel(_tl)
 
-    _savefig(fig1, os.path.join(output_dir, "time_evolution_physics.png"))
+    _savefig(fig1, os.path.join(output_dir, "figs/time_evolution_physics.png"))
 
-    # ── Figure 2: numerical checks ───────────────────────────────────────────
+# ------------------------ Figure 2: numerical checks ------------------------ #
     fig2, ax2 = plt.subplots(3, 1, figsize=(8, 9), sharex=True,
                               constrained_layout=True)
 
@@ -352,10 +498,10 @@ def time_evolution_check(snap_path: str, output_dir: str):
     ax2[2].set_title("Compton cooling check")
     ax2[2].set_xlabel(_tl)
 
-    _savefig(fig2, os.path.join(output_dir, "time_evolution_numerics.png"))
+    _savefig(fig2, os.path.join(output_dir, "figs/time_evolution_numerics.png"))
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# ----------------------------------- Main ----------------------------------- #
 
 _ALL_CHECKS = ("integrity", "resolution", "conservation", "compton", "time_evolution", "slices")
 
@@ -363,7 +509,6 @@ _ALL_CHECKS = ("integrity", "resolution", "conservation", "compton", "time_evolu
 @app.command()
 def main(
     input_file: str = typer.Argument(
-        default="/data1/projects/pi-rossiem/TDE_data/R0.47M0.5BH10000beta1S60n1.5ComptonNewAMR/snap_372/snap_372.h5",
         help="Input .h5 snapshot.",
     ),
     output_dir: str = typer.Argument(
@@ -382,9 +527,9 @@ def main(
     """Run RICH TDE snapshot diagnostics.
 
     Examples:
-      python auto_diagnostics.py snap.h5               # run all checks
-      python auto_diagnostics.py snap.h5 -c integrity  # integrity only
-      python auto_diagnostics.py snap.h5 -c time_evolution -c slices
+      python diagnostics.py snap.h5               # run all checks
+      python diagnostics.py snap.h5 -c integrity  # integrity only
+      python diagnostics.py snap.h5 -c time_evolution -c slices
     """
     if checks:
         unknown = set(checks) - set(_ALL_CHECKS)
@@ -399,9 +544,8 @@ def main(
     os.makedirs(output_dir, exist_ok=True)
     snap_num = _snap_num(input_file)
 
-    log_path = os.path.join(output_dir, "diagnostics.log")
-    log_sink = logger.add(log_path, mode="a", level="DEBUG",
-                          format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}")
+    log_path = os.path.join(output_dir, LOG_FNAME)
+    log_sink = logger.add(log_path, mode="a")
 
     logger.info("=== Diagnostics snap_{} : {} ===", snap_num, input_file)
 

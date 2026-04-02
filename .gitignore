@@ -1,4 +1,5 @@
 .vscode
+*/__pycache__/
 snellius-backup
 snellius-logs
 YujieSnellius
