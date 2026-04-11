@@ -1,7 +1,7 @@
 SHELL=/bin/bash
 
 # Copy from snellius scratch shared
-0 */8 * * * rclone copy snellius:/scratch-shared/yhe/rich-data /disks/emrdata/YujieSnellius --log-file=/data1/yujiehe/snellius-logs/rclone.log --log-level=INFO
+0 */8 * * * bash /home/yujiehe/rich-monitor/scripts/backup_snellius_scratch.sh
 
 # Run diagnostiscs on the latest snapshot
 20 */8 * * * bash /home/yujiehe/rich-monitor/scripts/run_dispatch.sh /disks/emrdata/YujieSnellius/R0.47M0.5BH100000beta1S60n1.5ComptonHiResNewAMR/ /data1/yujiehe/snellius-logs/
@@ -9,5 +9,5 @@ SHELL=/bin/bash
 # Do progress monitor
 45 6 * * * bash /home/yujiehe/rich-monitor/scripts/run_monitor.sh /disks/emrdata/YujieSnellius/R0.47M0.5BH100000beta1S60n1.5ComptonHiResNewAMR/ /data1/yujiehe/snellius-logs/
 
-# Backup the home folder (which includes runtime outputs)
-45 */8 * * * rclone copy snellius:/home/yhe/RICH/snellius /data1/yujiehe/snellius-backup --exclude="/rich-data**" --log-file=/data1/yujiehe/snellius-logs/rclone-backup.log --log-level=INFO
+# Backup the home folder
+45 */8 * * * bash /home/yujiehe/rich-monitor/scripts/backup_snellius_home.sh
