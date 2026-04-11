@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Dispatch diagnostics.py for snapshots in a directory.
 
@@ -28,20 +27,21 @@ import sys
 from typing import List, Optional
 
 import typer
+from diagnostics import CACHE_FNAME, _snap_num
 from loguru import logger
-
-from diagnostics import _snap_num, CACHE_FNAME
 
 app = typer.Typer()
 
 # --------------------------------- Defaults --------------------------------- #
 
 _SCRIPT     = os.path.join(os.path.dirname(os.path.abspath(__file__)), "diagnostics.py")
+_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "diagnostics.py")
 
 # Update this when you add or remove a per-snapshot PNG-producing check.
 N_EXPECTED_PNGS = 6
 
 # --------------------------------- Helpers ---------------------------------- #
+
 
 def _is_full(snap_path: str) -> bool:
     return "snap_full_" in os.path.basename(snap_path)
@@ -74,19 +74,31 @@ def _find_snaps(snap_dir: str) -> list:
 
 # ----------------------------------- Main ----------------------------------- #
 
+
 @app.command()
 def main(
     snap_dir: str = typer.Argument(help="Directory containing snapshots."),
     output_dir: str = typer.Argument(help="Output directory for figures and cache."),
-    overwrite_all: bool = typer.Option(False, "--overwrite-all", help="Rerun all snapshots."),
-    overwrite_full: bool = typer.Option(False, "--overwrite-full", help="Rerun snap_full_*.h5 snapshots."),
-    overwrite_nonfull: bool = typer.Option(False, "--overwrite-nonfull", help="Rerun snap_*.h5 (non-full) snapshots."),
+    overwrite_all: bool = typer.Option(
+        False, "--overwrite-all", help="Rerun all snapshots."
+    ),
+    overwrite_full: bool = typer.Option(
+        False, "--overwrite-full", help="Rerun snap_full_*.h5 snapshots."
+    ),
+    overwrite_nonfull: bool = typer.Option(
+        False, "--overwrite-nonfull", help="Rerun snap_*.h5 (non-full) snapshots."
+    ),
     overwrite_snaps: Optional[List[int]] = typer.Option(
-        None, "--overwrite-snap",
+        None,
+        "--overwrite-snap",
         help="Rerun a specific snapshot number (repeat for multiple).",
     ),
-    all_snaps: bool = typer.Option(False, "--all", help="Process all unprocessed snapshots (default: latest only)."),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Print what would run without running."),
+    all_snaps: bool = typer.Option(
+        False, "--all", help="Process all unprocessed snapshots (default: latest only)."
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Print what would run without running."
+    ),
 ):
     os.makedirs(output_dir, exist_ok=True)
     log_sink = logger.add(os.path.join(output_dir, "dispatch.log"), mode="a")
@@ -119,14 +131,23 @@ def main(
         )
 
         if not force and _is_done(snap_path, output_dir, cache):
-            logger.debug("Skip snap_{} — already done ({} PNGs, in cache)", n, _n_pngs(n, output_dir))
+            logger.debug(
+                "Skip snap_{} — already done ({} PNGs, in cache)",
+                n,
+                _n_pngs(n, output_dir),
+            )
             n_skip += 1
             continue
 
-        reason = "overwrite" if force else f"incomplete ({_n_pngs(n, output_dir)}/{N_EXPECTED_PNGS} PNGs)"
+        reason = (
+            "overwrite"
+            if force
+            else f"incomplete ({_n_pngs(n, output_dir)}/{N_EXPECTED_PNGS} PNGs)"
+        )
         if dry_run:
-            logger.info("[dry-run] snap_{} ({}) — {}", n, os.path.basename(snap_path), reason)
-            n_run += 1
+            logger.info(
+                "[dry-run] snap_{} ({}) — {}", n, os.path.basename(snap_path), reason
+            )
             continue
 
         logger.info("Running diagnostics for snap_{} ({})", n, reason)
