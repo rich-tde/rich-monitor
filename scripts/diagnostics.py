@@ -167,12 +167,12 @@ def integrity_check(snap_path: str) -> list[str]:
 
 
 def slice_proj_check(snap, output_dir: str, snap_num: int):
-    """Generate mid-plane slice and column-projection plots.
+    """Generate mid-plane slice and column-projection plots in one 6-panel figure.
 
-    Produces xy-plane slices of density, temperature, and dissipation, plus
-    column-density and dissipation projections.  Figures are written to
-    ``<output_dir>/figs/`` as PNG files named
-    ``<field>_slice_snap<NNNN>.png`` / ``<field>_proj_snap<NNNN>.png``.
+    Produces a 2×3 figure: top row = xy-plane slices of density, temperature,
+    and dissipation; bottom row = column-density projection, dissipation
+    projection, and an empty panel.  Figure is written to
+    ``<output_dir>/figs/slice_proj_snap<NNNN>.png``.
 
     :param snap: Loaded RICH snapshot object.
     :param output_dir: Root output directory; a ``figs/`` sub-directory must
@@ -185,27 +185,35 @@ def slice_proj_check(snap, output_dir: str, snap_num: int):
     box = _get_box(snap)
     t_day = snap.time.to("day")
 
-    kwfield2slice = {
-        "density": {"label_latex": r"\rho", "cmap": "twilight"},
-        "temperature": {"label_latex": "T", "cmap": "inferno"},
-        "dissipation": {
-            "label_latex": r"\dot{E}_\mathrm{diss}",
-            "unit_latex": r"\mathrm{erg\,s^{-1}\,cm^{-3}}",
-            "cmap": "viridis",
-        },
-    }
-    kwfield2proj = {
-        "density": {"label_latex": r"\Sigma", "cmap": "twilight"},
-        "dissipation": {
-            "label_latex": r"\int\dot{E}_\mathrm{diss}\,dz",
-            "cmap": "viridis",
-            "vmin": 14,
-            "vmax": 19,
-        },
-    }
-    # TODO: should be able to only interpolate once
-    for field, kw in kwfield2slice.items():
-        fig, ax = plt.subplots()
+    slice_panels = [
+        ("density", {"label_latex": r"\rho", "cmap": "twilight"}),
+        ("temperature", {"label_latex": "T", "cmap": "inferno"}),
+        (
+            "dissipation",
+            {
+                "label_latex": r"\dot{E}_\mathrm{diss}",
+                "unit_latex": r"\mathrm{erg\,s^{-1}\,cm^{-3}}",
+                "cmap": "viridis",
+            },
+        ),
+    ]
+    proj_panels = [
+        ("density", {"label_latex": r"\Sigma", "cmap": "twilight"}),
+        (
+            "dissipation",
+            {
+                "label_latex": r"\int\dot{E}_\mathrm{diss}\,dz",
+                "cmap": "viridis",
+                "vmin": 14,
+                "vmax": 19,
+            },
+        ),
+    ]
+
+    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+    fig.suptitle(f"Slices & Projections  t = {t_day:.2f}", fontsize=14)
+
+    for ax, (field, kw) in zip(axes[0], slice_panels):
         snap.plots.slice(
             data=field,
             res=512,
@@ -218,20 +226,17 @@ def slice_proj_check(snap, output_dir: str, snap_num: int):
             ax=ax,
             **kw,
         )
-        plt.title(f"{field} slice {t_day:.2f}")
-        _savefig(
-            fig, os.path.join(output_dir, f"figs/{field}_slice_snap{snap_num:04d}.png")
-        )
+        ax.set_title(f"{field} slice")
 
-    for field, kw in kwfield2proj.items():
-        fig, ax = plt.subplots()
+    for ax, (field, kw) in zip(axes[1], proj_panels):
         snap.plots.projection(
             data=field, res=512, X="X", Y="Y", Z="Z", box_size=box, ax=ax, **kw
         )
-        plt.title(f"{field} projection {t_day:.2f}")
-        _savefig(
-            fig, os.path.join(output_dir, f"figs/{field}_proj_snap{snap_num:04d}.png")
-        )
+        ax.set_title(f"{field} projection")
+
+    axes[1, 2].set_visible(False)
+
+    _savefig(fig, os.path.join(output_dir, f"figs/slice_proj_snap{snap_num:04d}.png"))
 
 
 # ----------------------------- Resolution check ----------------------------- #
@@ -592,6 +597,7 @@ def main(
         run = set(_ALL_CHECKS)
 
     os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(os.path.join(output_dir, "figs"), exist_ok=True)
     snap_num = _snap_num(input_file)
 
     log_path = os.path.join(output_dir, LOG_FNAME)
