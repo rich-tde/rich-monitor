@@ -9,6 +9,7 @@ import re
 from typing import List, Optional
 
 import h5py
+import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 import typer
@@ -21,9 +22,9 @@ app = typer.Typer()
 
 # --------------------------------- Constants -------------------------------- #
 
-T_COMPTON = 1e8  # K - Compton cooling threshold
-RHO_FLOOR = 1e-19  # g/cm³ - density floor; cells below this are "fluff"
-RHO_VIZ_CUT = 1e-18  # g/cm³ - cut for auto box-sizing
+T_COMPTON = u.unyt_quantity(1e8, "K")
+RHO_FLOOR = u.unyt_quantity(1e-19, "g/cm**3")
+RHO_VIZ_CUT = u.unyt_quantity(1e-18, "g/cm**3")
 CACHE_FNAME = "diagnostics_cache.json"
 LOG_FNAME = "diagnostics.log"
 
@@ -53,7 +54,7 @@ def _cell_mass(snap) -> u.unyt_array:
     :returns: Per-cell mass array in grams.
     :rtype: :class:`unyt.unyt_array`
     """
-    return (snap.density * snap.volume).to("g")
+    return snap.density * snap.volume
 
 
 def _fluff_mask(snap) -> np.ndarray:
@@ -67,10 +68,10 @@ def _fluff_mask(snap) -> np.ndarray:
     :returns: Boolean array of shape ``(N,)``; ``True`` for fluff cells.
     :rtype: :class:`numpy.ndarray`
     """
-    return (snap.density.to("g/cm**3").v < RHO_FLOOR) & (np.abs(snap.star - 1) > 1e-3)
+    return (snap.density < RHO_FLOOR) & (np.abs(snap.star - 1) > 1e-3)
 
 
-def _get_box(snap):
+def _get_box(snap) -> u.unyt_array:
     """Compute an axis-aligned bounding box for visualisation.
 
     Cells with density above :data:`RHO_VIZ_CUT` define the extent; each
@@ -82,7 +83,7 @@ def _get_box(snap):
               units as the snapshot coordinates.
     :rtype: :class:`unyt.unyt_array`
     """
-    mask = snap.density.to("g/cm**3").v > RHO_VIZ_CUT
+    mask = snap.density > RHO_VIZ_CUT
     X, Y, Z = snap.X[mask], snap.Y[mask], snap.Z[mask]
 
     def pad(lo, hi):
@@ -96,7 +97,7 @@ def _get_box(snap):
     return u.unyt_array([xlo, ylo, zlo, xhi, yhi, zhi], X.units)
 
 
-def _savefig(fig, path: str):
+def _savefig(fig, path: str, dpi: int = 200):
     """Save a matplotlib figure to *path* and close it.
 
     :param fig: Figure to save.
@@ -104,7 +105,7 @@ def _savefig(fig, path: str):
     :param path: Destination file path (extension determines format).
     :type path: str
     """
-    fig.savefig(path, dpi=200, bbox_inches="tight")
+    fig.savefig(path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
     logger.success("Saved {}", path)
 
@@ -210,7 +211,7 @@ def slice_proj_check(snap, output_dir: str, snap_num: int):
         ),
     ]
 
-    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+    fig, axes = plt.subplots(2, 3, figsize=(23, 10))
     fig.suptitle(f"Slices & Projections  t = {t_day:.2f}", fontsize=14)
 
     for ax, (field, kw) in zip(axes[0], slice_panels):
@@ -226,17 +227,144 @@ def slice_proj_check(snap, output_dir: str, snap_num: int):
             ax=ax,
             **kw,
         )
+        ax.set_aspect("equal")
         ax.set_title(f"{field} slice")
 
     for ax, (field, kw) in zip(axes[1], proj_panels):
         snap.plots.projection(
             data=field, res=512, X="X", Y="Y", Z="Z", box_size=box, ax=ax, **kw
         )
+        ax.set_aspect("equal")
         ax.set_title(f"{field} projection")
 
     axes[1, 2].set_visible(False)
 
     _savefig(fig, os.path.join(output_dir, f"figs/slice_proj_snap{snap_num:04d}.png"))
+
+
+# ---------------------------- Pericenter zoom-in ---------------------------- #
+
+
+def _parse_run_params(path: str) -> tuple:
+    """Extract (R_star [Rsun], Mstar [Msun], Mbh [Msun], beta) from a path."""
+    float_capture = r"([+-]?[0-9]*[.]?[0-9]+)"
+    m = re.search(r"R{0}M{0}BH{0}beta{0}".format(float_capture), path)
+    if not m:
+        raise ValueError(f"Cannot parse TDE params from path: {path}")
+    R, Mstar, Mbh, beta = (float(x) for x in m.group(1, 2, 3, 4))
+    return R, Mstar, Mbh, beta
+
+
+def pericenter_check(snap, input_file: str, output_dir: str, snap_num: int):
+    """Zoom-in slice plots centred on the pericenter region.
+
+    Produces a 2×2 panel figure (density, temperature, dissipation, sound speed)
+    with the box spanning ``x ∈ [-0.5 rp, 2.5 rp]``, ``y ∈ [-1.5 rp, 1.5 rp]``.
+    The pericenter distance is derived from run parameters in the path.
+
+    :param snap: Loaded RICH snapshot object.
+    :param input_file: Path to the snapshot (used to parse run params).
+    :type input_file: str
+    :param output_dir: Root output directory; ``figs/`` sub-directory must exist.
+    :type output_dir: str
+    :param snap_num: Snapshot index used in the output filename.
+    :type snap_num: int
+    """
+    logger.info("Pericenter zoom-in check...")
+
+    # R, Mstar, Mbh are in solar units → rp is in R☉ (= code_length) directly
+    R_rsun, Mstar_msun, Mbh_msun, beta = _parse_run_params(input_file)
+    rp = R_rsun * (Mbh_msun / Mstar_msun) ** (1.0 / 3.0) / beta * richio.units.lscale
+    r0 = 0.6 * rp  # smoothing length
+
+    t = snap.time
+
+    box = [
+        -0.5 * rp,
+        -1.5 * rp,
+        snap.box[5],
+        2.5 * rp,
+        1.5 * rp,
+        snap.box[2],
+    ]
+
+    panels = [
+        ("density", {"label_latex": r"\rho", "cmap": "twilight"}),
+        ("temperature", {"label_latex": "T", "cmap": "inferno"}),
+        ("dissipation", {"label_latex": r"\dot{E}_\mathrm{diss}", "cmap": "viridis"}),
+    ]
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    fig.suptitle(
+        rf"Pericenter zoom-in  $r_p={rp.v:.3g}\,R_\odot$  t = {t.to('day').v:.2f}",
+        fontsize=13,
+    )
+
+    for ax, (field, kw) in zip(axes.flat[:3], panels):
+        snap.plots.slice(
+            data=field,
+            res=512,
+            X="X",
+            Y="Y",
+            Z="Z",
+            plane="xy",
+            slice_coord=0,
+            box_size=box,
+            ax=ax,
+            **kw,
+        )
+        ax.set_title(f"{field} slice")
+
+    # Sound speed: compute in code units, convert to km/s once for visualization
+    ax_cs = axes.flat[3]
+    gamma_eff = snap.pressure / (snap.density * snap.internal_energy) + 1.0
+    cs = np.sqrt(np.abs(gamma_eff * snap.pressure / snap.density))
+    snap.plots.slice(
+        data=cs,
+        res=512,
+        X="X",
+        Y="Y",
+        Z="Z",
+        plane="xy",
+        slice_coord=0,
+        box_size=box,
+        ax=ax_cs,
+        label_latex=r"c_s",
+        unit_latex=r"\mathrm{cm\,s^{-1}}",
+        cmap="plasma",
+    )
+    ax_cs.set_title("sound speed slice")
+
+    for ax in axes.flat:
+        for radius, label in [(r0.v, r"$r_0$"), (rp.v, r"$r_p$")]:
+            ax.add_patch(
+                mpatches.Circle(
+                    (0, 0),
+                    radius,
+                    fill=False,
+                    linestyle="--",
+                    color="white",
+                    linewidth=1,
+                    zorder=5,
+                )
+            )
+            ax.annotate(
+                label,
+                xy=(0, radius),
+                color="white",
+                fontsize=9,
+                ha="center",
+                va="bottom",
+                zorder=6,
+            )
+        ax.set_xlim(box[0].v, box[3].v)
+        ax.set_ylim(box[1].v, box[4].v)
+
+    _savefig(
+        fig,
+        os.path.join(output_dir, f"figs/pericenter_snap{snap_num:04d}.png"),
+        dpi=400,
+    )
 
 
 # ----------------------------- Resolution check ----------------------------- #
@@ -257,12 +385,12 @@ def resolution_check(snap, output_dir: str, snap_num: int):
     :type snap_num: int
     """
     logger.info("Resolution check...")
-    h = snap.volume.v ** (1 / 3)  # cell-size proxy [cm]
-    mass = _cell_mass(snap).v
+    h = snap.volume ** (1 / 3)  # cell-size proxy in code_length (R☉)
+    mass = _cell_mass(snap)
 
     fig, axes = plt.subplots(2, 1, figsize=(7, 7), sharex=True, constrained_layout=True)
 
-    log_h = np.log10(h)
+    log_h = np.log10(h.v)
     bins = np.linspace(log_h.min(), log_h.max(), 101)
 
     axes[0].hist(log_h, bins=bins, color="steelblue", histtype="step")
@@ -271,7 +399,11 @@ def resolution_check(snap, output_dir: str, snap_num: int):
     axes[0].set_title("Cell-size distribution")
 
     axes[1].hist(
-        log_h, bins=bins, weights=mass / mass.sum(), color="steelblue", histtype="step"
+        log_h,
+        bins=bins,
+        weights=(mass / mass.sum()).v,
+        color="steelblue",
+        histtype="step",
     )
     axes[1].set_xlabel(r"$\log_{10}(h\ [\mathrm{R}_\odot])$")
     axes[1].set_ylabel("Mass fraction")
@@ -279,7 +411,7 @@ def resolution_check(snap, output_dir: str, snap_num: int):
     axes[1].set_title("Mass-weighted cell-size distribution")
 
     logger.info(
-        "  h: min={:.3e}  median={:.3e}  max={:.3e}  [cm]",
+        "  h: min={:.3e}  median={:.3e}  max={:.3e}",
         h.min(),
         np.median(h),
         h.max(),
@@ -310,23 +442,15 @@ def conservation_check(snap) -> dict:
     :rtype: dict
     """
     logger.info("Conservation / global budget...")
-    mass = _cell_mass(snap)  # [g]
-    vx = snap.Vx.to("cm/s")
-    vy = snap.Vy.to("cm/s")
-    vz = snap.Vz.to("cm/s")
-    ie = snap.InternalEnergy.to("erg/g")
-    erad = snap.Erad.to("erg/g")
-    x = snap.X.to("cm")
-    y = snap.Y.to("cm")
-    z = snap.Z.to("cm")
+    mass = _cell_mass(snap)
 
     M = mass.sum().to("g")
-    Ek = (0.5 * mass * (vx**2 + vy**2 + vz**2)).sum().to("erg")
-    Et = (mass * ie).sum().to("erg")
-    Er = (mass * erad).sum().to("erg")
-    Lx = (mass * (y * vz - z * vy)).sum().to("g*cm**2/s")
-    Ly = (mass * (z * vx - x * vz)).sum().to("g*cm**2/s")
-    Lz = (mass * (x * vy - y * vx)).sum().to("g*cm**2/s")
+    Ek = (0.5 * mass * (snap.Vx**2 + snap.Vy**2 + snap.Vz**2)).sum().to("erg")
+    Et = (mass * snap.InternalEnergy).sum().to("erg")
+    Er = (mass * snap.Erad).sum().to("erg")
+    Lx = (mass * (snap.Y * snap.Vz - snap.Z * snap.Vy)).sum().to("g*cm**2/s")
+    Ly = (mass * (snap.Z * snap.Vx - snap.X * snap.Vz)).sum().to("g*cm**2/s")
+    Lz = (mass * (snap.X * snap.Vy - snap.Y * snap.Vx)).sum().to("g*cm**2/s")
 
     logger.info("  M_total       = {:.4e}", M)
     logger.info("  E_kinetic     = {:.4e}", Ek)
@@ -360,10 +484,9 @@ def compton_check(snap) -> float:
     :returns: Hot-gas mass fraction ∈ [0, 1].
     :rtype: float
     """
-    logger.info("Compton cooling check  (T > {:.0e} K)...", T_COMPTON)
-    mass = _cell_mass(snap).v
-    T = snap.temperature.to("K").v
-    frac = mass[T > T_COMPTON].sum() / mass.sum()
+    logger.info("Compton cooling check  (T > {})...", T_COMPTON)
+    mass = _cell_mass(snap)
+    frac = (mass[snap.temperature > T_COMPTON].sum() / mass.sum()).v
     logger.info("  Hot-gas mass fraction: {}  ({} %)", frac, frac * 100)
     if frac > 0.05:
         logger.warning("  > 5 % - Compton cooling may not be effective!")
@@ -390,17 +513,17 @@ def smoothing_check(snap) -> dict:
     :rtype: dict
     """
     logger.info("Smoothing-length approximation check...")
-    h = snap.volume.to("cm**3").v ** (1 / 3)
-    mass = _cell_mass(snap).v
-    diss_w = (snap.dissipation * snap.volume).to("erg/s").v
+    h = snap.volume ** (1 / 3)
+    mass = _cell_mass(snap)
+    diss_w = snap.dissipation * snap.volume
 
     h_med = np.median(h)
     large = h > h_med
 
-    f_mass = mass[large].sum() / mass.sum()
-    f_diss = diss_w[large].sum() / diss_w.sum()
+    f_mass = (mass[large].sum() / mass.sum()).v
+    f_diss = (diss_w[large].sum() / diss_w.sum()).v
 
-    logger.info("  Median cell size h = {:.3e} cm", h_med)
+    logger.info("  Median cell size h = {:.3e}", h_med)
     logger.info("  Mass fraction  in h > h_median : {:.4f}", f_mass)
     logger.info("  Diss fraction  in h > h_median : {:.4f}", f_diss)
     return dict(f_mass_large_h=float(f_mass), f_diss_large_h=float(f_diss))
@@ -425,30 +548,21 @@ def _scalars_for_snap(snap_path: str) -> dict:
     :rtype: dict
     """
     snap = richio.load(snap_path)
-    mass = _cell_mass(snap).v
-    vx = snap.Vx.to("cm/s").v
-    vy = snap.Vy.to("cm/s").v
-    vz = snap.Vz.to("cm/s").v
-    # x      = snap.X.to("cm").v;     y  = snap.Y.to("cm").v;      z  = snap.Z.to("cm").v
-    diss_w = (
-        (snap.dissipation.to("erg/s/cm**3") * snap.volume.to("cm**3")).to("erg/s").v
-    )
+    mass = _cell_mass(snap)
+    diss_w = snap.dissipation * snap.volume
     fluff = _fluff_mask(snap)
 
     return dict(
         time_s=float(snap.time.to("s").v),
-        M_tot_g=float(mass.sum()),
-        E_kin_erg=float((0.5 * mass * (vx**2 + vy**2 + vz**2)).sum()),
-        E_thm_erg=float((mass * snap.InternalEnergy.to("erg/g").v).sum()),
-        E_rad_erg=float((mass * snap.Erad.to("erg/g").v).sum()),
-        # Lx_cgs              = float((mass * (y * vz - z * vy)).sum()),
-        # Ly_cgs              = float((mass * (z * vx - x * vz)).sum()),
-        # Lz_cgs              = float((mass * (x * vy - y * vx)).sum()),
-        diss_total_erg_s=float(diss_w.sum()),
-        diss_fluff_frac=float(diss_w[fluff].sum() / diss_w.sum()),
-        hot_mass_frac=float(
-            mass[snap.temperature.to("K").v > T_COMPTON].sum() / mass.sum()
+        M_tot_g=float(mass.sum().to("g").v),
+        E_kin_erg=float(
+            (0.5 * mass * (snap.Vx**2 + snap.Vy**2 + snap.Vz**2)).sum().to("erg").v
         ),
+        E_thm_erg=float((mass * snap.InternalEnergy).sum().to("erg").v),
+        E_rad_erg=float((mass * snap.Erad).sum().to("erg").v),
+        diss_total_erg_s=float(diss_w.sum().to("erg/s").v),
+        diss_fluff_frac=float((diss_w[fluff].sum() / diss_w.sum()).v),
+        hot_mass_frac=float((mass[snap.temperature > T_COMPTON].sum() / mass.sum()).v),
     )
 
 
@@ -556,6 +670,7 @@ _ALL_CHECKS = (
     "compton",
     "time_evolution",
     "slices",
+    "pericenter",
 )
 
 
@@ -609,7 +724,13 @@ def main(
         integrity_check(input_file)
 
     # Load snapshot only if needed for any remaining check
-    _needs_snap = run & {"resolution", "conservation", "compton", "slices"}
+    _needs_snap = run & {
+        "resolution",
+        "conservation",
+        "compton",
+        "slices",
+        "pericenter",
+    }
     snap = None
     if _needs_snap:
         logger.info("Loading snapshot...")
@@ -627,6 +748,9 @@ def main(
 
     if "slices" in run:
         slice_proj_check(snap, output_dir, snap_num)
+
+    if "pericenter" in run:
+        pericenter_check(snap, input_file, output_dir, snap_num)
 
     if "time_evolution" in run:
         time_evolution_check(input_file, output_dir)
