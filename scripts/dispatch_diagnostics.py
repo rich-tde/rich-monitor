@@ -8,37 +8,46 @@ A snapshot is considered "done" when:
 
 To add/remove a check in diagnostics.py that produces a PNG: update N_EXPECTED_PNGS.
 
+This script also integrates measure_speed.py to process Snellius benchmark logs
+that match the simulation parameters extracted from the snapshot directory name.
+
 Usage:
-  python dispatch_diagnostics.py                          # process only latest snap for default directory
-  python dispatch_diagnostics.py /disks/emrdata/YujieSnellius/R0.47M0.5BH100000beta1S60n1.5ComptonHiResNewAMR
+  python dispatch_diagnostics.py /path/to/snaps /path/to/output
   python dispatch_diagnostics.py --all                    # process all new/incomplete snaps
   python dispatch_diagnostics.py --overwrite-all          # rerun everything
   python dispatch_diagnostics.py --overwrite-full         # rerun snap_full_* only
   python dispatch_diagnostics.py --overwrite-nonfull      # rerun snap_* (non-full) only
   python dispatch_diagnostics.py --overwrite-snap 67 --overwrite-snap 68
   python dispatch_diagnostics.py --dry-run                # preview without running
+  python dispatch_diagnostics.py --no-measure-speed       # skip benchmark log processing
 """
 
 import glob
 import json
+import math
 import os
+import re
 import subprocess
 import sys
+from pathlib import Path
 from typing import List, Optional
 
 import typer
 from diagnostics import CACHE_FNAME, _snap_num
 from loguru import logger
+from progress_monitor import _parse_job_name, _parse_run_params
 
 app = typer.Typer()
 
 # --------------------------------- Defaults --------------------------------- #
 
-_SCRIPT     = os.path.join(os.path.dirname(os.path.abspath(__file__)), "diagnostics.py")
 _SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "diagnostics.py")
+_MEASURE_SPEED_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "measure_speed.py")
+_LOG_DIR = "/data2/yujiehe/rich-monitor/snellius-backup/logs"
 
-# Update this when you add or remove a per-snapshot PNG-producing check.
-N_EXPECTED_PNGS = 6
+# Per-snapshot PNG-producing checks: slice_proj, pericenter, resolution_check.
+# Update when adding/removing checks in diagnostics.py that write a PNG.
+N_EXPECTED_PNGS = 3
 
 # --------------------------------- Helpers ---------------------------------- #
 
@@ -72,6 +81,61 @@ def _find_snaps(snap_dir: str) -> list:
     return sorted(set(snaps), key=_snap_num)
 
 
+# --------------------------------- Speed Measurement --------------------------------- #
+
+
+def _find_log_files(snap_dir: str, log_dir: str = _LOG_DIR) -> List[Path]:
+    """Find log files in log_dir whose SLURM job name matches snap_dir's parameters."""
+    try:
+        R, Mstar, Mbh, beta, _ = _parse_run_params(snap_dir)
+    except Exception as e:
+        logger.warning("Could not parse run parameters from {}: {}", snap_dir, e)
+        return []
+
+    matched = []
+    for path in sorted(Path(log_dir).glob("*.out")):
+        m = re.fullmatch(r"\d+_(.+)", path.stem)
+        if not m:
+            continue
+        params = _parse_job_name(m.group(1))
+        if params and (
+            math.isclose(params["R"], R)
+            and math.isclose(params["Mstar"], Mstar)
+            and math.isclose(params["Mbh"], Mbh)
+            and math.isclose(params["beta"], beta)
+        ):
+            matched.append(path)
+    return matched
+
+
+def _process_log_files(
+    snap_dir: str, output_dir: str, log_dir: str = _LOG_DIR, dry_run: bool = False
+) -> int:
+    """Find log files matching snap_dir's parameters and delegate to measure_speed.py."""
+    speed_output_dir = os.path.join(output_dir, "speed_figs")
+    os.makedirs(speed_output_dir, exist_ok=True)
+
+    log_files = _find_log_files(snap_dir, log_dir)
+    if not log_files:
+        logger.info("No log files found for {} in {}", snap_dir, log_dir)
+        return 0
+
+    logger.info("Found {} log file(s) for {}", len(log_files), snap_dir)
+
+    if dry_run:
+        for lf in log_files:
+            logger.info("[dry-run] Would process {}", lf.name)
+        return len(log_files)
+
+    result = subprocess.run(
+        [sys.executable, _MEASURE_SPEED_SCRIPT, "--output-dir", speed_output_dir]
+        + [str(lf) for lf in log_files]
+    )
+    if result.returncode != 0:
+        logger.error("measure_speed.py failed")
+    return len(log_files)
+
+
 # ----------------------------------- Main ----------------------------------- #
 
 
@@ -98,6 +162,14 @@ def main(
     ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Print what would run without running."
+    ),
+    measure_speed: bool = typer.Option(
+        True, "--measure-speed/--no-measure-speed", help="Skip benchmark log processing."
+    ),
+    log_dir: str = typer.Option(
+        _LOG_DIR,
+        "--log-dir",
+        help="Directory containing benchmark logs.",
     ),
 ):
     os.makedirs(output_dir, exist_ok=True)
@@ -158,7 +230,14 @@ def main(
         else:
             logger.error("diagnostics.py failed for snap_{}", n)
 
-    logger.info("Finished. Ran: {}, Skipped: {}", n_run, n_skip)
+    logger.info("Finished snapshot processing. Ran: {}, Skipped: {}", n_run, n_skip)
+
+    # Process benchmark logs if enabled
+    if measure_speed:
+        logger.info("Processing benchmark logs")
+        n_logs = _process_log_files(snap_dir, output_dir, log_dir, dry_run)
+        logger.info("Processed {} log file(s)", n_logs)
+
     logger.remove(log_sink)
 
 
