@@ -14,15 +14,16 @@ app = typer.Typer()
 
 # --------------------------------- Constants -------------------------------- #
 
-INPUT_FILE = "/home/yujiehe/rich-monitor/snellius-backup/logs/21547515_100steps_M05R047MBH1e5beta1.out"
-OUTPUT_DIR = "/home/yujiehe/rich-monitor/snellius-logs"
+INPUT_FILE = (
+    "/data2/yujiehe/rich-monitor/snellius-backup/logs/21732963_M05R047MBH1e5beta1.out"
+)
+OUTPUT_DIR = "/data2/yujiehe/rich-monitor/snellius-logs/figs"
 NPLOT = 100
 
 # --------------------------------- Functions -------------------------------- #
 
-def parse_file(path:str) -> dict:
 
-def parse_file(path: str) -> dict:
+def parse_file(path: Path) -> dict:
     text = path.read_text()
 
     re_ntasks = re.compile(r"--ntasks=(\d+)")
@@ -54,6 +55,9 @@ def parse_file(path: str) -> dict:
 
 
 def rolave(data, window):
+    """
+    Compute the rolling average of a 1D array over a given window size.
+    """
     return np.lib.stride_tricks.sliding_window_view(data, window).mean(axis=-1)
 
 
@@ -70,6 +74,12 @@ def main(
         "--output-dir",
         "-o",
         help="Output directory",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-f",
+        help="",
     ),
 ):
     # Expand any glob patterns that the shell didn't expand (e.g. quoted globs)
@@ -93,6 +103,15 @@ def main(
     print("-" * 80)
 
     for p in paths:
+        fig_fname = os.path.join(output_dir, p.name.replace(".out", ".png"))
+
+        if os.path.exists(fig_fname) and not force:
+            if p.stat().st_mtime <= os.path.getmtime(fig_fname):
+                # print(f"{fig_fname} is up to date.")
+                continue
+            # else:
+            # print(f"{fig_fname} is outdated. Updating...")
+
         try:
             rec = parse_file(p)
         except Exception as e:
@@ -108,8 +127,7 @@ def main(
             f"{np.median(rec['perf']):>22.1f} {np.mean(rec['perf']):>10.1f}  {p.name}"
         )
 
-        # ----------------------------------- Plot ----------------------------------- #
-        fig_fname = os.path.join(output_dir, p.name.replace(".out", ".png"))
+        # ----------------------------------- Plot -----------------------------------
 
         rolsize = len(rec["cycle"]) // NPLOT if len(rec["cycle"]) > NPLOT else None
 
@@ -138,7 +156,10 @@ def main(
         fig.suptitle(
             f"Partition: {rec['partition']}  Ncores: {rec['ncores']}  {p.name}"
         )
+        fig.savefig(fig_fname, dpi=200)
         plt.close(fig)
+
+        print(f"{fig_fname} saved.")
 
 
 if __name__ == "__main__":
