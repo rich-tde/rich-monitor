@@ -244,7 +244,7 @@ def _parse_job_name(name: str) -> dict | None:
             float(s[0] + "." + s[1:]) if s.startswith("0") and len(s) > 1 else float(s)
         )
 
-    m = re.search(r"M(\d+)R(\d+)MBH([0-9e+]+)beta([0-9.]+)", name, re.IGNORECASE)
+    m = re.fullmatch(r"M(\d+)R(\d+)MBH([0-9e+]+)beta([0-9.]+)", name, re.IGNORECASE)
     if not m:
         return None
     return dict(
