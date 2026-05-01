@@ -1,3 +1,6 @@
 [submodule "richio"]
 	path = richio
 	url = https://github.com/rich-tde/richio.git
+[submodule "academic-mplstyle"]
+	path = academic-mplstyle
+	url = https://github.com/YujieH3/academic-mplstyle.git

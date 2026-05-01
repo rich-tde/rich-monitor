@@ -1,5 +1,8 @@
 .vscode
+.claude
 */__pycache__/
 snellius-backup
 snellius-logs
 YujieSnellius
+alice
+analysis/_*
