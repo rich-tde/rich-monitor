@@ -45,9 +45,9 @@ _SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "diagnostics.
 _MEASURE_SPEED_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "measure_speed.py")
 _LOG_DIR = "/data2/yujiehe/rich-monitor/snellius-backup/logs"
 
-# Per-snapshot PNG-producing checks: slice_proj, pericenter, resolution_check.
+# Per-snapshot PNG-producing checks: 3×slice_proj (xy/xz/yz), 3×pericenter (xy/xz/yz), resolution_check.
 # Update when adding/removing checks in diagnostics.py that write a PNG.
-N_EXPECTED_PNGS = 3
+N_EXPECTED_PNGS = 7
 
 # --------------------------------- Helpers ---------------------------------- #
 

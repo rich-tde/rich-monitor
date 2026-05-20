@@ -17,6 +17,7 @@ import unyt as u
 from loguru import logger
 
 import richio
+from richio.plots import scalar_map
 
 app = typer.Typer()
 
@@ -168,12 +169,12 @@ def integrity_check(snap_path: str) -> list[str]:
 
 
 def slice_proj_check(snap, output_dir: str, snap_num: int):
-    """Generate mid-plane slice and column-projection plots in one 6-panel figure.
+    """Generate mid-plane slice and column-projection plots for xy, xz, and yz planes.
 
-    Produces a 2×3 figure: top row = xy-plane slices of density, temperature,
-    and dissipation; bottom row = column-density projection, dissipation
-    projection, and an empty panel.  Figure is written to
-    ``<output_dir>/figs/slice_proj_snap<NNNN>.png``.
+    Produces three 2×3 figures (one per plane): top row = slices of density,
+    temperature, and dissipation; bottom row = column-density projection,
+    dissipation projection, and an empty panel.  Figures are written to
+    ``<output_dir>/figs/slice_proj_{plane}_snap<NNNN>.png``.
 
     :param snap: Loaded RICH snapshot object.
     :param output_dir: Root output directory; a ``figs/`` sub-directory must
@@ -198,48 +199,48 @@ def slice_proj_check(snap, output_dir: str, snap_num: int):
             },
         ),
     ]
-    proj_panels = [
-        ("density", {"label_latex": r"\Sigma", "cmap": "twilight"}),
-        (
-            "dissipation",
-            {
-                "label_latex": r"\int\dot{E}_\mathrm{diss}\,dz",
-                "cmap": "viridis",
-                "vmin": 14,
-                "vmax": 19,
-            },
-        ),
-    ]
 
-    fig, axes = plt.subplots(2, 3, figsize=(23, 10))
-    fig.suptitle(f"Slices & Projections  t = {t_day:.2f}", fontsize=14)
+    for plane, int_axis in [("xy", "z"), ("xz", "y"), ("yz", "x")]:
+        proj_panels = [
+            ("density", {"label_latex": r"\Sigma", "cmap": "twilight"}),
+            (
+                "dissipation",
+                {
+                    "label_latex": rf"\int\dot{{E}}_\mathrm{{diss}}\,d{int_axis}",
+                    "cmap": "viridis",
+                    "vmin": 14,
+                    "vmax": 19,
+                },
+            ),
+        ]
 
-    for ax, (field, kw) in zip(axes[0], slice_panels):
-        snap.plots.slice(
-            data=field,
-            res=512,
-            X="X",
-            Y="Y",
-            Z="Z",
-            plane="xy",
-            slice_coord=0,
-            box_size=box,
-            ax=ax,
-            **kw,
+        fig, axes = plt.subplots(2, 3, figsize=(23, 10))
+        fig.suptitle(
+            f"Slices & Projections ({plane}-plane)  t = {t_day:.2f}", fontsize=14
         )
-        ax.set_aspect("equal")
-        ax.set_title(f"{field} slice")
 
-    for ax, (field, kw) in zip(axes[1], proj_panels):
-        snap.plots.projection(
-            data=field, res=512, X="X", Y="Y", Z="Z", box_size=box, ax=ax, **kw
+        # One kd-tree interpolation for all slice panels
+        si, sxsp, sysp = snap.to_2dgrid(res=512, plane=plane, slice_coord=0, box_size=box)
+        for ax, (field, kw) in zip(axes[0], slice_panels):
+            sliced = getattr(snap, field)[si].in_base("cgs")
+            scalar_map(sliced, sxsp, sysp, ax=ax, **kw)
+            ax.set_title(f"{field} slice")
+
+        # One kd-tree interpolation for all projection panels
+        pi, pxsp, pysp, pzsp = snap.to_3dgrid(res=512, plane=plane, box_size=box)
+        dz = pzsp[1:] - pzsp[:-1]
+        for ax, (field, kw) in zip(axes[1], proj_panels):
+            field_3d = getattr(snap, field)[pi]
+            projected = np.sum(field_3d[:-1, :-1, :-1] * dz, axis=-1).in_base("cgs")
+            scalar_map(projected, pxsp, pysp, ax=ax, **kw)
+            ax.set_title(f"{field} projection")
+
+        axes[1, 2].set_visible(False)
+
+        _savefig(
+            fig,
+            os.path.join(output_dir, f"figs/slice_proj_{plane}_snap{snap_num:04d}.png"),
         )
-        ax.set_aspect("equal")
-        ax.set_title(f"{field} projection")
-
-    axes[1, 2].set_visible(False)
-
-    _savefig(fig, os.path.join(output_dir, f"figs/slice_proj_snap{snap_num:04d}.png"))
 
 
 # ---------------------------- Pericenter zoom-in ---------------------------- #
@@ -256,11 +257,13 @@ def _parse_run_params(path: str) -> tuple:
 
 
 def pericenter_check(snap, input_file: str, output_dir: str, snap_num: int):
-    """Zoom-in slice plots centred on the pericenter region.
+    """Zoom-in slice plots centred on the pericenter region for xy, xz, and yz planes.
 
-    Produces a 2×2 panel figure (density, temperature, dissipation, sound speed)
-    with the box spanning ``x ∈ [-0.5 rp, 2.5 rp]``, ``y ∈ [-1.5 rp, 1.5 rp]``.
-    The pericenter distance is derived from run parameters in the path.
+    Produces three 2×2 panel figures (one per plane), each showing density,
+    temperature, dissipation, and sound speed.  The xy box spans
+    ``x ∈ [-0.5 rp, 2.5 rp]``, ``y ∈ [-1.5 rp, 1.5 rp]``; xz and yz use
+    ±1.5 rp for the out-of-plane axis.  Pericenter distance is derived from
+    run parameters in the path.
 
     :param snap: Loaded RICH snapshot object.
     :param input_file: Path to the snapshot (used to parse run params).
@@ -279,14 +282,22 @@ def pericenter_check(snap, input_file: str, output_dir: str, snap_num: int):
 
     t = snap.time
 
-    box = [
-        -0.5 * rp,
-        -1.5 * rp,
-        snap.box[5],
-        2.5 * rp,
-        1.5 * rp,
-        snap.box[2],
-    ]
+    # box format: [xlo, ylo, zlo, xhi, yhi, zhi]
+    # lim_indices: (xlo_idx, xhi_idx, ylo_idx, yhi_idx) into box for ax xlim/ylim
+    plane_configs = {
+        "xy": {
+            "box": [-0.5 * rp, -1.5 * rp, snap.box[5], 2.5 * rp, 1.5 * rp, snap.box[2]],
+            "lim": (0, 3, 1, 4),
+        },
+        "xz": {
+            "box": [-0.5 * rp, snap.box[1], -1.5 * rp, 2.5 * rp, snap.box[4], 1.5 * rp],
+            "lim": (0, 3, 2, 5),
+        },
+        "yz": {
+            "box": [snap.box[0], -1.5 * rp, -1.5 * rp, snap.box[3], 1.5 * rp, 1.5 * rp],
+            "lim": (1, 4, 2, 5),
+        },
+    }
 
     panels = [
         ("density", {"label_latex": r"\rho", "cmap": "twilight"}),
@@ -294,77 +305,70 @@ def pericenter_check(snap, input_file: str, output_dir: str, snap_num: int):
         ("dissipation", {"label_latex": r"\dot{E}_\mathrm{diss}", "cmap": "viridis"}),
     ]
 
-    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
-    fig.suptitle(
-        rf"Pericenter zoom-in  $r_p={rp.v:.3g}\,R_\odot$  t = {t.to('day').v:.2f}",
-        fontsize=13,
-    )
-
-    for ax, (field, kw) in zip(axes.flat[:3], panels):
-        snap.plots.slice(
-            data=field,
-            res=512,
-            X="X",
-            Y="Y",
-            Z="Z",
-            plane="xy",
-            slice_coord=0,
-            box_size=box,
-            ax=ax,
-            **kw,
-        )
-        ax.set_title(f"{field} slice")
-
-    # Sound speed: compute in code units, convert to km/s once for visualization
-    ax_cs = axes.flat[3]
     gamma_eff = snap.pressure / (snap.density * snap.internal_energy) + 1.0
     cs = np.sqrt(np.abs(gamma_eff * snap.pressure / snap.density))
-    snap.plots.slice(
-        data=cs,
-        res=512,
-        X="X",
-        Y="Y",
-        Z="Z",
-        plane="xy",
-        slice_coord=0,
-        box_size=box,
-        ax=ax_cs,
-        label_latex=r"c_s",
-        unit_latex=r"\mathrm{cm\,s^{-1}}",
-        cmap="plasma",
-    )
-    ax_cs.set_title("sound speed slice")
 
-    for ax in axes.flat:
-        for radius, label in [(r0.v, r"$r_0$"), (rp.v, r"$r_p$")]:
-            ax.add_patch(
-                mpatches.Circle(
-                    (0, 0),
-                    radius,
-                    fill=False,
-                    linestyle="--",
-                    color="white",
-                    linewidth=1,
-                    zorder=5,
+    for plane, cfg in plane_configs.items():
+        box = cfg["box"]
+        xi0, xi1, yi0, yi1 = cfg["lim"]
+
+        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+        fig.suptitle(
+            rf"Pericenter zoom-in ({plane}-plane)  $r_p={rp.v:.3g}\,R_\odot$"
+            rf"  t = {t.to('day').v:.2f}",
+            fontsize=13,
+        )
+
+        # One kd-tree interpolation for all four panels
+        si, sxsp, sysp = snap.to_2dgrid(res=512, plane=plane, slice_coord=0, box_size=box)
+
+        for ax, (field, kw) in zip(axes.flat[:3], panels):
+            sliced = getattr(snap, field)[si].in_base("cgs")
+            scalar_map(sliced, sxsp, sysp, ax=ax, **kw)
+            ax.set_title(f"{field} slice")
+
+        ax_cs = axes.flat[3]
+        scalar_map(
+            cs[si].in_base("cgs"),
+            sxsp,
+            sysp,
+            ax=ax_cs,
+            label_latex=r"c_s",
+            unit_latex=r"\mathrm{cm\,s^{-1}}",
+            cmap="plasma",
+        )
+        ax_cs.set_title("sound speed slice")
+
+        for ax in axes.flat:
+            for radius, label in [(r0.v, r"$r_0$"), (rp.v, r"$r_p$")]:
+                ax.add_patch(
+                    mpatches.Circle(
+                        (0, 0),
+                        radius,
+                        fill=False,
+                        linestyle="--",
+                        color="white",
+                        linewidth=1,
+                        zorder=5,
+                    )
                 )
-            )
-            ax.annotate(
-                label,
-                xy=(0, radius),
-                color="white",
-                fontsize=9,
-                ha="center",
-                va="bottom",
-                zorder=6,
-            )
-        ax.set_xlim(box[0].v, box[3].v)
-        ax.set_ylim(box[1].v, box[4].v)
+                ax.annotate(
+                    label,
+                    xy=(0, radius),
+                    color="white",
+                    fontsize=9,
+                    ha="center",
+                    va="bottom",
+                    zorder=6,
+                )
+            ax.set_xlim(box[xi0].v, box[xi1].v)
+            ax.set_ylim(box[yi0].v, box[yi1].v)
 
-    _savefig(
-        fig,
-        os.path.join(output_dir, f"figs/pericenter_snap{snap_num:04d}.png"),
-        dpi=400,
-    )
+        _savefig(
+            fig,
+            os.path.join(output_dir, f"figs/pericenter_{plane}_snap{snap_num:04d}.png"),
+            dpi=400,
+        )
 
 
 # ----------------------------- Resolution check ----------------------------- #
