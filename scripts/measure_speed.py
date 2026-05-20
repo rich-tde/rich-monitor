@@ -17,7 +17,7 @@ app = typer.Typer()
 INPUT_FILE = (
     "/data2/yujiehe/rich-monitor/snellius-backup/logs/21732963_M05R047MBH1e5beta1.out"
 )
-OUTPUT_DIR = "/data2/yujiehe/rich-monitor/snellius-logs/figs"
+OUTPUT_DIR = "/data2/yujiehe/rich-monitor/snellius-logs/test_figs"
 NPLOT = 100
 
 # --------------------------------- Functions -------------------------------- #
@@ -31,18 +31,20 @@ def parse_file(path: Path) -> dict:
     ncores = int(re_ntasks.search(text).group(1))
     partition = re_part.search(text).group(1)
 
-    re_step = re.compile(r"Point num (\d+) dt \S+ run time (\S+)\nCycle (\d+)")
-    steps = re_step.findall(text)  # [(ncells, run_time), ...]
+    re_step = re.compile(r"Point num (\d+) dt (\S+) run time (\S+)\nCycle (\d+)")
+    steps = re_step.findall(text)  # [(ncells, dt, run_time, cycle), ...]
     perf = []
     ncells = []
     cycle = []
     time = []
-    for n, t, c in steps:
+    dt = []
+    for n, d, t, c in steps:
         if float(t) > 0:
             perf.append(int(n) / (float(t) * ncores))
             ncells.append(int(n))
             cycle.append(int(c))
             time.append(float(t))
+            dt.append(float(d))
 
     return dict(
         partition=partition,
@@ -51,6 +53,7 @@ def parse_file(path: Path) -> dict:
         ncells=np.array(ncells),
         cycle=np.array(cycle),
         time=np.array(time),
+        dt=np.array(dt),
     )
 
 
@@ -129,29 +132,38 @@ def main(
 
         # ----------------------------------- Plot -----------------------------------
 
-        rolsize = len(rec["cycle"]) // NPLOT if len(rec["cycle"]) > NPLOT else None
+        _n = len(rec["cycle"])
+        rolsize = _n // NPLOT if _n // NPLOT >= 2 else None
 
         fig, ax = plt.subplots(
-            3, 1, figsize=(10, 5), sharex=True, constrained_layout=True
+            4, 1, figsize=(10, 7), sharex=True, constrained_layout=True
         )
         ax[0].plot(rec["cycle"], rec["perf"])
-        ax[0].plot(rec["cycle"][: (-rolsize + 1)], rolave(rec["perf"], rolsize)) if len(
-            rec["cycle"]
-        ) > NPLOT else None
-        ax[0].axhline(np.median(rec["perf"]), linestyle="--", color="k")
+        ax[0].plot(
+            rec["cycle"][: (-rolsize + 1)], rolave(rec["perf"], rolsize)
+        ) if rolsize else None
+        ax[0].axhline(np.mean(rec["perf"]), linestyle="--", color="k")
         ax[0].set_ylabel("Cell/core/s")
 
         ax[1].plot(rec["cycle"], rec["time"])
-        ax[1].plot(rec["cycle"][: (-rolsize + 1)], rolave(rec["time"], rolsize)) if len(
-            rec["cycle"]
-        ) > NPLOT else None
-        ax[1].axhline(np.median(rec["time"]), linestyle="--", color="k")
+        ax[1].plot(
+            rec["cycle"][: (-rolsize + 1)], rolave(rec["time"], rolsize)
+        ) if rolsize else None
+        ax[1].axhline(np.mean(rec["time"]), linestyle="--", color="k")
         ax[1].set_ylabel("Time[s]/step")
 
         ax[2].plot(rec["cycle"], rec["ncells"])
         ax[2].axhline(np.median(rec["ncells"]), linestyle="--", color="k")
         ax[2].set_ylabel("Number of cells")
-        ax[2].set_xlabel("Steps")
+
+        ax[3].plot(rec["cycle"], rec["dt"])
+        ax[3].plot(
+            rec["cycle"][: (-rolsize + 1)], rolave(rec["dt"], rolsize)
+        ) if rolsize else None
+        ax[3].axhline(np.median(rec["dt"]), linestyle="--", color="k")
+        ax[3].set_ylabel("dt")
+        ax[3].set_yscale("log")
+        ax[3].set_xlabel("Steps")
 
         fig.suptitle(
             f"Partition: {rec['partition']}  Ncores: {rec['ncores']}  {p.name}"
