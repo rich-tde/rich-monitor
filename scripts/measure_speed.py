@@ -99,13 +99,18 @@ def main(
         raise typer.Exit(1)
 
     # ------------------------------- Print summary ------------------------------ #
-    print(
-        f"{'Partition':<8} {'Ncores':>8} "
-        f"{'Median [cell/core/s]':>22} {'Mean':>10}  {'File'}"
-    )
-    print("-" * 80)
 
+    print_header = True
     for p in paths:
+        if print_header is True:
+            print(
+                f"{'Partition':<8} {'Ncores':>8} "
+                f"{'Median [cell/core/s]':>22} {'Mean':>10}  {'File'}"
+            )
+            print("-" * 80)
+
+            print_header = False
+
         fig_fname = os.path.join(output_dir, p.name.replace(".out", ".png"))
 
         if os.path.exists(fig_fname) and not force:
@@ -118,11 +123,11 @@ def main(
         try:
             rec = parse_file(p)
         except Exception as e:
-            typer.echo(f"Skipping {p.name}: {e}", err=True)
+            # typer.echo(f"Skipping {p.name}: {e}", err=True)
             continue
 
         if len(rec["cycle"]) == 0:
-            typer.echo(f"Skipping {p.name}: no output found", err=True)
+            # typer.echo(f"Skipping {p.name}: no output found", err=True)
             continue
 
         print(
@@ -162,8 +167,7 @@ def main(
         ) if rolsize else None
         ax[3].axhline(np.median(rec["dt"]), linestyle="--", color="k")
         ax[3].set_ylabel("dt")
-        ax[3].set_yscale("log")
-        ax[3].set_xlabel("Steps")
+        ax[3].set_xlabel("Cycles")
 
         fig.suptitle(
             f"Partition: {rec['partition']}  Ncores: {rec['ncores']}  {p.name}"
