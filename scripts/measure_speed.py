@@ -102,15 +102,6 @@ def main(
 
     print_header = True
     for p in paths:
-        if print_header is True:
-            print(
-                f"{'Partition':<8} {'Ncores':>8} "
-                f"{'Median [cell/core/s]':>22} {'Mean':>10}  {'File'}"
-            )
-            print("-" * 80)
-
-            print_header = False
-
         fig_fname = os.path.join(output_dir, p.name.replace(".out", ".png"))
 
         if os.path.exists(fig_fname) and not force:
@@ -129,6 +120,15 @@ def main(
         if len(rec["cycle"]) == 0:
             # typer.echo(f"Skipping {p.name}: no output found", err=True)
             continue
+
+        if print_header is True:
+            print(
+                f"{'Partition':<8} {'Ncores':>8} "
+                f"{'Median [cell/core/s]':>22} {'Mean':>10}  {'File'}"
+            )
+            print("-" * 80)
+
+            print_header = False
 
         print(
             f"{rec['partition']:<8} {rec['ncores']:>8} "
