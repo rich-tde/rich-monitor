@@ -1,4 +1,2 @@
 #!/bin/bash
-source /home/yujiehe/.bashrc
-conda activate rich
-python "$(dirname "$0")/progress_monitor.py" "$@"
+exec "/data2/yujiehe/.conda/envs/richio/bin/python" "$(dirname "$0")/progress_monitor.py" "$@"
