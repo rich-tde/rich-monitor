@@ -24,7 +24,8 @@ import math
 # ---------------------------------------------------------------------------
 TSCALE = 1603.0  # seconds per code time unit (so G = 1)
 NCORES = 960
-SPEED = 2900  # cell-updates / core / second (observed sustained, healthy state)
+SPEED = 2500  # cell-updates / core / second (observed sustained, healthy state)
+TIMESTEP = 0.0010
 NFALLBACKTIME = 2
 
 SEC_PER_DAY = 86400
@@ -44,7 +45,7 @@ class Run:
     R: float  # solar radii
     beta: float
     ncells: float  # AMR-inflated, hand-set
-    dt_factor: float = 1000.0  # dt = t_peri / dt_factor
+    dt: float = TIMESTEP  # dt = t_peri / dt_factor
 
     def t_peri(self) -> float:
         Rp = self.R * (self.Mbh / self.M) ** (1 / 3) / self.beta
@@ -65,7 +66,7 @@ class Run:
         )
 
     def nsteps(self) -> float:
-        return NFALLBACKTIME * self.t_fb() / (self.t_peri() / self.dt_factor)
+        return NFALLBACKTIME * self.t_fb() / self.dt
 
 
 # R from main-sequence M-R relation R ~ M^0.8.
@@ -98,7 +99,7 @@ def main():
     total_sbu = 0.0
     for r in RUNS:
         ns = r.nsteps()
-        dt = r.t_peri() / r.dt_factor
+        dt = r.dt
         wall_s = ns * r.ncells / (SPEED * NCORES)
         sbu = wall_s / 3600 * NCORES
         total_sbu += sbu
