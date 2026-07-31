@@ -2,13 +2,14 @@
 Automatic diagnostics for RICH TDE simulation snapshots.
 """
 
+import gc
 import glob
 import json
 import os
 import re
 from typing import List, Optional
 
-import h5py
+import matplotlib.colors as mcolors
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
@@ -25,7 +26,6 @@ app = typer.Typer()
 
 T_COMPTON = u.unyt_quantity(1e8, "K")
 RHO_FLOOR = u.unyt_quantity(1e-19, "g/cm**3")
-RHO_VIZ_CUT = u.unyt_quantity(1e-18, "g/cm**3")
 CACHE_FNAME = "diagnostics_cache.json"
 LOG_FNAME = "diagnostics.log"
 
@@ -33,15 +33,7 @@ LOG_FNAME = "diagnostics.log"
 
 
 def _snap_num(path: str) -> int:
-    """Extract the snapshot index from a file path.
-
-    Matches patterns ``snap_<N>.h5`` and ``snap_full_<N>.h5``.
-
-    :param path: File path of the snapshot.
-    :type path: str
-    :returns: Zero-based snapshot index, or ``-1`` if no match is found.
-    :rtype: int
-    """
+    """Snapshot index from a snap_<N>.h5 / snap_full_<N>.h5 path, or -1."""
     m = re.search(r"snap_(\d+)", path)
     if not m:
         m = re.search(r"snap_full_(\d+)", path)
@@ -49,63 +41,18 @@ def _snap_num(path: str) -> int:
 
 
 def _cell_mass(snap) -> u.unyt_array:
-    """Compute per-cell mass as density * volume.
-
-    :param snap: Loaded RICH snapshot object.
-    :returns: Per-cell mass array in grams.
-    :rtype: :class:`unyt.unyt_array`
-    """
+    """Per-cell mass = density * volume."""
     return snap.density * snap.volume
 
 
 def _fluff_mask(snap) -> np.ndarray:
-    """Boolean mask selecting background / density-floor cells.
-
-    A cell is considered *fluff* when its density is below :data:`RHO_FLOOR`
-    **and** its stellar-material tracer differs from unity by more than
-    ``1e-3`` (i.e. it carries negligible stellar content).
-
-    :param snap: Loaded RICH snapshot object.
-    :returns: Boolean array of shape ``(N,)``; ``True`` for fluff cells.
-    :rtype: :class:`numpy.ndarray`
-    """
+    """Background / density-floor cells: rho < RHO_FLOOR and non-stellar tracer."""
     return (snap.density < RHO_FLOOR) & (np.abs(snap.star - 1) > 1e-3)
 
 
-def _get_box(snap) -> u.unyt_array:
-    """Compute an axis-aligned bounding box for visualisation.
-
-    Cells with density above :data:`RHO_VIZ_CUT` define the extent; each
-    bound is then padded by 20 % outward so the domain boundary is never
-    clipped in slice / projection plots.
-
-    :param snap: Loaded RICH snapshot object.
-    :returns: Array ``[xlo, ylo, zlo, xhi, yhi, zhi]`` in the same length
-              units as the snapshot coordinates.
-    :rtype: :class:`unyt.unyt_array`
-    """
-    mask = snap.density > RHO_VIZ_CUT
-    X, Y, Z = snap.X[mask], snap.Y[mask], snap.Z[mask]
-
-    def pad(lo, hi):
-        lo = lo * (1.2 if lo < 0 else 0.8)
-        hi = hi * (1.2 if hi > 0 else 0.8)
-        return lo, hi
-
-    xlo, xhi = pad(X.min(), X.max())
-    ylo, yhi = pad(Y.min(), Y.max())
-    zlo, zhi = pad(Z.min(), Z.max())
-    return u.unyt_array([xlo, ylo, zlo, xhi, yhi, zhi], X.units)
-
-
 def _savefig(fig, path: str, dpi: int = 200):
-    """Save a matplotlib figure to *path* and close it.
-
-    :param fig: Figure to save.
-    :type fig: :class:`matplotlib.figure.Figure`
-    :param path: Destination file path (extension determines format).
-    :type path: str
-    """
+    """Save fig to path and close it, creating the parent directory if needed."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     fig.savefig(path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
     logger.success("Saved {}", path)
@@ -120,22 +67,7 @@ _KNOWN_ZERO = {"Eg_0"}
 
 
 def integrity_check(snap_path: str) -> list[str]:
-    """Validate particle fields in an HDF5 snapshot file.
-
-    Checks that:
-
-    * Every particle field has the same length *N*.
-    * No field (outside :data:`_KNOWN_ZERO`) is identically zero.
-    * No field contains ``NaN`` or ``Inf`` values.
-
-    Metadata keys in :data:`_METADATA_KEYS` (scalars such as ``Box``,
-    ``Cycle``, ``Time``) are skipped.
-
-    :param snap_path: Path to the ``.h5`` snapshot file.
-    :type snap_path: str
-    :returns: List of human-readable issue strings; empty if all fields pass.
-    :rtype: list[str]
-    """
+    """Check particle fields share one length N, none are all-zero, none have NaN/Inf."""
     logger.info("Integrity check: {}", snap_path)
     issues = []
     n_ref = None  # set once from first particle field
@@ -165,88 +97,10 @@ def integrity_check(snap_path: str) -> list[str]:
     return issues
 
 
-# --------------------------- Slices & projections --------------------------- #
+# ------------------------- Shared nine-panel quantity grid ------------------ #
 
 
-def slice_proj_check(snap, output_dir: str, snap_num: int):
-    """Generate mid-plane slice and column-projection plots for xy, xz, and yz planes.
-
-    Produces three 2×3 figures (one per plane): top row = slices of density,
-    temperature, and dissipation; bottom row = column-density projection,
-    dissipation projection, and an empty panel.  Figures are written to
-    ``<output_dir>/figs/slice_proj_{plane}_snap<NNNN>.png``.
-
-    :param snap: Loaded RICH snapshot object.
-    :param output_dir: Root output directory; a ``figs/`` sub-directory must
-                       already exist (or be created beforehand).
-    :type output_dir: str
-    :param snap_num: Snapshot index, used for output filenames.
-    :type snap_num: int
-    """
-    logger.info("Slice & projection plots...")
-    box = _get_box(snap)
-    t_day = snap.time.to("day")
-
-    slice_panels = [
-        ("density", {"label_latex": r"\rho", "cmap": "twilight"}),
-        ("temperature", {"label_latex": "T", "cmap": "inferno"}),
-        (
-            "dissipation",
-            {
-                "label_latex": r"\dot{E}_\mathrm{diss}",
-                "unit_latex": r"\mathrm{erg\,s^{-1}\,cm^{-3}}",
-                "cmap": "viridis",
-            },
-        ),
-    ]
-
-    for plane, int_axis in [("xy", "z"), ("xz", "y"), ("yz", "x")]:
-        proj_panels = [
-            ("density", {"label_latex": r"\Sigma", "cmap": "twilight"}),
-            (
-                "dissipation",
-                {
-                    "label_latex": rf"\int\dot{{E}}_\mathrm{{diss}}\,d{int_axis}",
-                    "cmap": "viridis",
-                    "vmin": 14,
-                    "vmax": 19,
-                },
-            ),
-        ]
-
-        fig, axes = plt.subplots(2, 3, figsize=(23, 10))
-        fig.suptitle(
-            f"Slices & Projections ({plane}-plane)  t = {t_day:.2f}", fontsize=14
-        )
-
-        # One kd-tree interpolation for all slice panels
-        si, sxsp, sysp = snap.to_2dgrid(res=512, plane=plane, slice_coord=0, box_size=box)
-        for ax, (field, kw) in zip(axes[0], slice_panels):
-            sliced = getattr(snap, field)[si].in_base("cgs")
-            scalar_map(sliced, sxsp, sysp, ax=ax, **kw)
-            ax.set_title(f"{field} slice")
-
-        # One kd-tree interpolation for all projection panels
-        pi, pxsp, pysp, pzsp = snap.to_3dgrid(res=512, plane=plane, box_size=box)
-        dz = pzsp[1:] - pzsp[:-1]
-        for ax, (field, kw) in zip(axes[1], proj_panels):
-            field_3d = getattr(snap, field)[pi]
-            projected = np.sum(field_3d[:-1, :-1, :-1] * dz, axis=-1).in_base("cgs")
-            scalar_map(projected, pxsp, pysp, ax=ax, **kw)
-            ax.set_title(f"{field} projection")
-
-        axes[1, 2].set_visible(False)
-
-        _savefig(
-            fig,
-            os.path.join(output_dir, f"figs/slice_proj_{plane}_snap{snap_num:04d}.png"),
-        )
-
-
-# ---------------------------- Pericenter zoom-in ---------------------------- #
-
-
-def _parse_run_params(path: str) -> tuple:
+def _parse_tde_params(path: str) -> tuple:
     """Extract (R_star [Rsun], Mstar [Msun], Mbh [Msun], beta) from a path."""
     float_capture = r"([+-]?[0-9]*[.]?[0-9]+)"
     m = re.search(r"R{0}M{0}BH{0}beta{0}".format(float_capture), path)
@@ -256,140 +110,498 @@ def _parse_run_params(path: str) -> tuple:
     return R, Mstar, Mbh, beta
 
 
-def pericenter_check(snap, input_file: str, output_dir: str, snap_num: int):
-    """Zoom-in slice plots centred on the pericenter region for xy, xz, and yz planes.
+def _scaled_box(input_file: str, radius_kind: str, mult: float) -> tuple:
+    """Symmetric cubic box of half-width mult * r, r = r_p or r_a. Returns (box, r)."""
+    R_rsun, Mstar_msun, Mbh_msun, beta = _parse_tde_params(input_file)
+    if radius_kind == "rp":
+        r = R_rsun * (Mbh_msun / Mstar_msun) ** (1.0 / 3.0) / beta * richio.units.lscale
+    else:
+        r = R_rsun * (Mbh_msun / Mstar_msun) ** (2.0 / 3.0) * richio.units.lscale
+    half = mult * r
+    return [-half, -half, -half, half, half, half], r
 
-    Produces three 2×2 panel figures (one per plane), each showing density,
-    temperature, dissipation, and sound speed.  The xy box spans
-    ``x ∈ [-0.5 rp, 2.5 rp]``, ``y ∈ [-1.5 rp, 1.5 rp]``; xz and yz use
-    ±1.5 rp for the out-of-plane axis.  Pericenter distance is derived from
-    run parameters in the path.
 
-    :param snap: Loaded RICH snapshot object.
-    :param input_file: Path to the snapshot (used to parse run params).
-    :type input_file: str
-    :param output_dir: Root output directory; ``figs/`` sub-directory must exist.
-    :type output_dir: str
-    :param snap_num: Snapshot index used in the output filename.
-    :type snap_num: int
+def _nine_panel_fields(snap, input_file: str) -> dict:
+    """Full-array fields for the shared 9-panel grid.
+
+    Direct fields (density, pressure, temperature, dissipation, Erad) plus
+    derived diagnostics: speed, Mach number, fallback time in units of t_min
+    (see analysis/amrtimestep/orbital_energy.ipynb), and the Bernoulli
+    parameter ``Be = 1/2 v^2 + P/rho + E_rad/3 - Phi`` (>0 => locally
+    unbound, BH at origin) shown as ``sgn(Be) log10(|Be / delta_eps|)`` — the
+    standard signed-log transform for a quantity that spans many orders of
+    magnitude on both sides of zero — where ``delta_eps = G Mbh Rstar / Rt^2``
+    is the frozen-in specific-energy spread of tidally disrupted debris.
+
+    The potential is Paczynski-Wiita, ``Phi = G Mbh / (r - r_g)`` with
+    ``r_g = 2 G Mbh / c^2``, which mimics the GR innermost-stable-orbit
+    behaviour; cells inside ``r_g`` are set to NaN rather than allowed to
+    flip sign.
     """
-    logger.info("Pericenter zoom-in check...")
+    R_rsun, Mstar_msun, Mbh_msun, _beta = _parse_tde_params(input_file)
+    Mbh = Mbh_msun * richio.units.mscale
+    Mstar = Mstar_msun * richio.units.mscale
+    Rstar = R_rsun * richio.units.lscale
+    Rt = Rstar * (Mbh / Mstar) ** (1.0 / 3.0)  # tidal radius (beta-independent)
+    delta_eps = u.G * Mbh * Rstar / Rt**2  # frozen-in energy spread
+    r_g = 2 * u.G * Mbh / u.c**2  # gravitational radius
 
-    # R, Mstar, Mbh are in solar units → rp is in R☉ (= code_length) directly
-    R_rsun, Mstar_msun, Mbh_msun, beta = _parse_run_params(input_file)
-    rp = R_rsun * (Mbh_msun / Mstar_msun) ** (1.0 / 3.0) / beta * richio.units.lscale
-    r0 = 0.6 * rp  # smoothing length
-
-    t = snap.time
-
-    # box format: [xlo, ylo, zlo, xhi, yhi, zhi]
-    # lim_indices: (xlo_idx, xhi_idx, ylo_idx, yhi_idx) into box for ax xlim/ylim
-    plane_configs = {
-        "xy": {
-            "box": [-0.5 * rp, -1.5 * rp, snap.box[5], 2.5 * rp, 1.5 * rp, snap.box[2]],
-            "lim": (0, 3, 1, 4),
-        },
-        "xz": {
-            "box": [-0.5 * rp, snap.box[1], -1.5 * rp, 2.5 * rp, snap.box[4], 1.5 * rp],
-            "lim": (0, 3, 2, 5),
-        },
-        "yz": {
-            "box": [snap.box[0], -1.5 * rp, -1.5 * rp, snap.box[3], 1.5 * rp, 1.5 * rp],
-            "lim": (1, 4, 2, 5),
-        },
-    }
-
-    panels = [
-        ("density", {"label_latex": r"\rho", "cmap": "twilight"}),
-        ("temperature", {"label_latex": "T", "cmap": "inferno"}),
-        ("dissipation", {"label_latex": r"\dot{E}_\mathrm{diss}", "cmap": "viridis"}),
-    ]
-
+    v_mag = np.sqrt(snap.Vx**2 + snap.Vy**2 + snap.Vz**2)
     gamma_eff = snap.pressure / (snap.density * snap.internal_energy) + 1.0
     cs = np.sqrt(np.abs(gamma_eff * snap.pressure / snap.density))
 
-    for plane, cfg in plane_configs.items():
-        box = cfg["box"]
-        xi0, xi1, yi0, yi1 = cfg["lim"]
+    r = np.sqrt(snap.X**2 + snap.Y**2 + snap.Z**2)
+    # Paczynski-Wiita potential; NaN inside r_g so the divergence there can't
+    # flip sign and masquerade as (very) bound material.
+    dr = r - r_g.to(r.units)
+    dr[dr <= 0] = np.nan  # inside the horizon: undefined, not "extremely bound"
+    phi = u.G * Mbh / dr
+    soe = 0.5 * v_mag**2 - phi  # specific orbital energy (no pressure term)
+    bernoulli = 0.5 * v_mag**2 + snap.pressure / snap.density + snap.Erad / 3.0 - phi
+    # Signed log of the (dimensionless) Bernoulli / energy-spread ratio. The
+    # .to("dimensionless") both validates dimensionlessness and simplifies the
+    # mixed code+cgs units; numpy's log10/sign then return a bare ndarray, so
+    # re-tag the genuinely-dimensionless result for the uniform plotting path.
+    be_ratio = (bernoulli / delta_eps).to("dimensionless")
+    bernoulli_symlog = u.unyt_array(
+        np.sign(be_ratio) * np.log10(np.abs(be_ratio)), "dimensionless"
+    )
 
-        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    tfb = np.sqrt(-(np.pi**2) / 2 * (u.G * Mbh) ** 2 / soe**3)
+    tfb_min = np.pi / np.sqrt(2) * Rstar**1.5 / np.sqrt(u.G * Mstar) * np.sqrt(Mbh / Mstar)
+
+    return {
+        "density": snap.density,
+        "pressure": snap.pressure,
+        "velocity": v_mag,
+        "temperature": snap.temperature,
+        "dissipation": snap.dissipation,
+        "mach": v_mag / cs,  # velocity/velocity -> already dimensionless
+        "erad": snap.Erad * snap.density,  # volumetric radiation energy [erg/cm^3]
+        "bernoulli": bernoulli_symlog,
+        "tfb_ratio": tfb / tfb_min,  # time/time -> already dimensionless
+        # raw components, for the velocity-panel streamlines (xy only)
+        "Vx": snap.Vx,
+        "Vy": snap.Vy,
+    }
+
+
+def _no_white_diverging(name: str = "RdBu_r", cut: float = 0.22, n: int = 256):
+    """Diverging colormap with the pale middle band removed.
+
+    A standard diverging map fades to white at zero, which is exactly where
+    the bound/unbound distinction has to be readable. Dropping the middle
+    ``cut`` fraction of each half leaves saturated blue for <0 and saturated
+    red for >0 with a hard break at zero, so sign reads at a glance.
+    """
+    base = plt.get_cmap(name)
+    lo = base(np.linspace(0.0, 0.5 - cut, n // 2))
+    hi = base(np.linspace(0.5 + cut, 1.0, n // 2))
+    return mcolors.ListedColormap(np.vstack([lo, hi]), name=f"{name}_nowhite")
+
+
+_BERNOULLI_CMAP = _no_white_diverging()
+
+
+# (key, panel title, scalar_map kwargs; log_scale defaults True unless given)
+_NINE_PANELS = [
+    ("density", "Density", dict(label_latex=r"\rho", cmap="twilight")),
+    ("pressure", "Pressure", dict(label_latex="P", cmap="rainbow")),
+    ("velocity", "Velocity", dict(label_latex=r"|v|", cmap="cividis")),
+    ("temperature", "Temperature", dict(label_latex="T", cmap="inferno")),
+    (
+        "dissipation",
+        "Dissipation",
+        dict(label_latex=r"\dot{E}_\mathrm{diss}", cmap="viridis"),
+    ),
+    (
+        "mach",
+        "Mach number",
+        dict(label_latex=r"|v|", unit_latex=r"c_s", cmap="plasma"),
+    ),
+    (
+        "erad",
+        "Radiation energy",
+        dict(label_latex=r"E_\mathrm{rad}", unit_latex=r"\mathrm{erg\,cm^{-3}}", cmap="magma"),
+    ),
+    (
+        "bernoulli",
+        "Bernoulli parameter",
+        dict(
+            label_latex=r"\mathrm{sgn}(\mathrm{Be})\log_{10}|\mathrm{Be}",
+            unit_latex=r"\Delta\epsilon|",
+            cmap=_BERNOULLI_CMAP,
+            log_scale=False,
+        ),
+    ),
+    (
+        "tfb_ratio",
+        "Fallback time",
+        dict(
+            label_latex=r"t_\mathrm{fb}",
+            unit_latex=r"t_\mathrm{min}",
+            cmap="rainbow",
+            # Explicit range: tfb spans ~18 decades, so the automatic top-6
+            # clip would land far above the physically interesting band.
+            # Focused on the most-bound debris that sets the early fallback
+            # rate (0.1 - ~2 t_min); longer-tfb material saturates.
+            vmin=-1.0,
+            vmax=0.3,
+        ),
+    ),
+]
+
+
+def _top_orders_range(data, n=4.0):
+    """vmin/vmax spanning only the top n orders of magnitude of positive data.
+
+    Dissipation floors span many more orders of magnitude than the
+    interesting (shock) region, which drowns out contrast there — clip to
+    the top n decades instead of the full range.
+    """
+    finite = data.v[np.isfinite(data.v) & (data.v > 0)]
+    if finite.size == 0:
+        return None, None
+    vmax = np.ceil(float(np.max(np.log10(finite))) * 2.0) / 2.0
+    return vmax - n, vmax
+
+
+def _plot_nine_panels(fields: dict, si, sxsp, sysp, axes):
+    """Render _NINE_PANELS onto 3x3 axes; overlays xy streamlines on the velocity panel."""
+    for ax, (key, title, kw) in zip(axes.flat, _NINE_PANELS):
+        kw = dict(kw)
+        log_scale = kw.pop("log_scale", True)
+        data = fields[key][si].in_base("cgs")
+        if key == "bernoulli":
+            # Robust (percentile) symmetric range: already signed-log
+            # transformed, but a handful of cells right at r=0 still diverge
+            # (log|Be| -> +inf) and can otherwise wash out the whole panel.
+            finite = data.v[np.isfinite(data.v)]
+            vmax = float(np.percentile(np.abs(finite), 99.5)) if finite.size else 1.0
+            kw.setdefault("vmin", -vmax)
+            kw.setdefault("vmax", vmax)
+        elif key == "dissipation":
+            vmin, vmax = _top_orders_range(data)
+            if vmin is not None:
+                kw.setdefault("vmin", vmin)
+                kw.setdefault("vmax", vmax)
+        scalar_map(data, sxsp, sysp, ax=ax, log_scale=log_scale, **kw)
+        ax.set_title(title)
+
+        if key == "velocity":
+            u_grid = fields["Vx"][si].in_base("cgs").v.T
+            v_grid = fields["Vy"][si].in_base("cgs").v.T
+            ax.streamplot(
+                sxsp.v,
+                sysp.v,
+                u_grid,
+                v_grid,
+                color="white",
+                linewidth=0.6,
+                density=1.3,
+                arrowsize=0.7,
+            )
+
+
+def _draw_circles(axes, box, circles):
+    """Overlay dashed reference circles (radius, label) and set axis limits from box."""
+    for ax in axes.flat:
+        for radius, label in circles:
+            ax.add_patch(
+                mpatches.Circle(
+                    (0, 0), radius, fill=False, linestyle="--", color="white",
+                    linewidth=1, zorder=5,
+                )
+            )
+            ax.annotate(
+                label, xy=(0, radius), color="white", fontsize=9,
+                ha="center", va="bottom", zorder=6,
+            )
+        ax.set_xlim(box[0].v, box[3].v)
+        ax.set_ylim(box[1].v, box[4].v)
+
+
+# --------------------------- Mid-plane slices -------------------------------- #
+
+# size -> (radius_kind, multiplier): box half-width = multiplier * r_{kind}.
+# Replaces the old separate pericenter/apocenter zoom-in checks.
+_BOX_SCALES = {
+    "small": ("rp", 1.75),
+    "middle": ("ra", 0.6),
+    "big": ("ra", 2.0),
+}
+
+# sizes and (plane, integration-axis) pairs projection_check renders — a
+# subset of _BOX_SCALES's sizes, all of its planes.
+_PROJECTION_SIZES = ("middle", "big")
+_PROJECTION_PLANES = [("xy", "z"), ("xz", "y")]
+
+# figs/ series-folder names (each written as figs/{series}/snap{N:04d}.png)
+# produced by each PNG-producing check, derived from the scale/plane config
+# above rather than hand-typed — so this can't silently drift out of sync as
+# that config changes. dispatch_diagnostics.py imports N_EXPECTED_PNGS_PER_SNAP
+# instead of hand-maintaining its own copy.
+PNG_SERIES_PER_SNAP = {
+    "resolution": ["resolution_check"],
+    "slice": [f"slice_{size}_xy" for size in _BOX_SCALES],
+    "projection": [
+        f"proj_{size}_{plane}" for size in _PROJECTION_SIZES for plane, _ax in _PROJECTION_PLANES
+    ],
+    "pericenter_yz": ["pericenter_yz"],
+    # folder name is computed at runtime from r_p (see yz_frac_pericenter_check);
+    # placeholder here only contributes to the count below.
+    "yz_frac_pericenter": ["<frac>rp_yz"],
+}
+N_EXPECTED_PNGS_PER_SNAP = sum(len(v) for v in PNG_SERIES_PER_SNAP.values())
+
+
+def slice_check(snap, fields: dict, input_file: str, output_dir: str, snap_num: int):
+    """Mid-plane 9-panel quantity grids (xy only), at each scale in _BOX_SCALES."""
+    logger.info("Mid-plane slice plots...")
+    t_day = snap.time.to("day")
+
+    for size, (kind, mult) in _BOX_SCALES.items():
+        box, r = _scaled_box(input_file, kind, mult)
+        label = r"r_p" if kind == "rp" else r"r_a"
+        circles = [(r.v, rf"${label}$")]
+        if kind == "rp":
+            circles.insert(0, (0.6 * r.v, r"$r_0$"))  # smoothing length
+
+        fig, axes = plt.subplots(3, 3, figsize=(18, 15), constrained_layout=True)
         fig.suptitle(
-            rf"Pericenter zoom-in ({plane}-plane)  $r_p={rp.v:.3g}\,R_\odot$"
-            rf"  t = {t.to('day').v:.2f}",
-            fontsize=13,
+            rf"Mid-plane slices (xy-plane, {size} box)  "
+            rf"${label}={r.v:.3g}\,R_\odot$  t = {t_day:.2f}",
+            fontsize=16,
         )
 
-        # One kd-tree interpolation for all four panels
-        si, sxsp, sysp = snap.to_2dgrid(res=512, plane=plane, slice_coord=0, box_size=box)
-
-        for ax, (field, kw) in zip(axes.flat[:3], panels):
-            sliced = getattr(snap, field)[si].in_base("cgs")
-            scalar_map(sliced, sxsp, sysp, ax=ax, **kw)
-            ax.set_title(f"{field} slice")
-
-        ax_cs = axes.flat[3]
-        scalar_map(
-            cs[si].in_base("cgs"),
-            sxsp,
-            sysp,
-            ax=ax_cs,
-            label_latex=r"c_s",
-            unit_latex=r"\mathrm{cm\,s^{-1}}",
-            cmap="plasma",
-        )
-        ax_cs.set_title("sound speed slice")
-
-        for ax in axes.flat:
-            for radius, label in [(r0.v, r"$r_0$"), (rp.v, r"$r_p$")]:
-                ax.add_patch(
-                    mpatches.Circle(
-                        (0, 0),
-                        radius,
-                        fill=False,
-                        linestyle="--",
-                        color="white",
-                        linewidth=1,
-                        zorder=5,
-                    )
-                )
-                ax.annotate(
-                    label,
-                    xy=(0, radius),
-                    color="white",
-                    fontsize=9,
-                    ha="center",
-                    va="bottom",
-                    zorder=6,
-                )
-            ax.set_xlim(box[xi0].v, box[xi1].v)
-            ax.set_ylim(box[yi0].v, box[yi1].v)
+        si, sxsp, sysp = snap.to_2dgrid(res=512, plane="xy", slice_coord=0, box_size=box)
+        _plot_nine_panels(fields, si, sxsp, sysp, axes)
+        _draw_circles(axes, box, circles)
 
         _savefig(
             fig,
-            os.path.join(output_dir, f"figs/pericenter_{plane}_snap{snap_num:04d}.png"),
-            dpi=400,
+            os.path.join(output_dir, f"figs/slice_{size}_xy/snap{snap_num:04d}.png"),
+            dpi=300,
         )
+
+
+# ----------------------------- Column projections ---------------------------- #
+
+
+def projection_check(snap, input_file: str, output_dir: str, snap_num: int):
+    """Column-projection 4-panel grids (Sigma, Erad, IE, dissipation).
+
+    Middle and big box, xy and xz planes. Sigma = int(rho) dl [g/cm^2]; the
+    energy panels are mass-weighted, int(rho * specific_field) dl [erg/cm^2],
+    matching conservation_check's convention; dissipation is int(Ediss_dot)
+    dl [erg/s/cm^2].
+    """
+    logger.info("Projection plots...")
+    t_day = snap.time.to("day")
+
+    # Pre-multiply on the (much smaller) per-particle arrays so each 3-D
+    # kd-tree index below yields the final field directly, instead of
+    # materialising density_3d and {Erad,IE}_3d as separate res^3 arrays and
+    # multiplying them: doing that at res=512 in 3-D OOM-killed the process.
+    rho_erad = snap.density * snap.Erad
+    rho_ie = snap.density * snap.internal_energy
+
+    jobs = [
+        (size, plane, ax)
+        for size in _PROJECTION_SIZES
+        for plane, ax in _PROJECTION_PLANES
+    ]
+
+    for size, plane, int_axis in jobs:
+        box, r = _scaled_box(input_file, *_BOX_SCALES[size])
+        pi, pxsp, pysp, pzsp = snap.to_3dgrid(res=256, plane=plane, box_size=box)
+        dz = pzsp[1:] - pzsp[:-1]
+
+        # (field, label, cmap, unit_latex, clip_top4_orders)
+        panels = [
+            (snap.density, r"\Sigma", "twilight", None, False),
+            (
+                rho_erad,
+                rf"\int\rho E_\mathrm{{rad}}\,d{int_axis}",
+                "magma",
+                r"\mathrm{erg\,cm^{-2}}",
+                False,
+            ),
+            (
+                rho_ie,
+                rf"\int\rho\,\mathrm{{IE}}\,d{int_axis}",
+                "inferno",
+                r"\mathrm{erg\,cm^{-2}}",
+                False,
+            ),
+            (
+                snap.dissipation,
+                rf"\int\dot{{E}}_\mathrm{{diss}}\,d{int_axis}",
+                "viridis",
+                r"\mathrm{erg\,s^{-1}\,cm^{-2}}",
+                True,  # floors span too many decades; clip to the top 4
+            ),
+        ]
+
+        fig, axes = plt.subplots(2, 2, figsize=(12, 10), constrained_layout=True)
+        fig.suptitle(
+            rf"Projections ({plane}-plane, {size} box)  "
+            rf"$r={r.v:.3g}\,R_\odot$  t = {t_day:.2f}",
+            fontsize=14,
+        )
+
+        for ax, (field_1d, label, cmap, unit_latex, clip) in zip(axes.flat, panels):
+            field_3d = field_1d[pi]  # one res^3 array alive at a time
+            projected = np.sum(field_3d[:-1, :-1, :-1] * dz, axis=-1).in_base("cgs")
+            kw = {}
+            if clip:
+                vmin, vmax = _top_orders_range(projected)
+                if vmin is not None:
+                    kw["vmin"], kw["vmax"] = vmin, vmax
+            scalar_map(
+                projected, pxsp, pysp, ax=ax,
+                label_latex=label, cmap=cmap, unit_latex=unit_latex, **kw,
+            )
+
+        _savefig(
+            fig,
+            os.path.join(output_dir, f"figs/proj_{size}_{plane}/snap{snap_num:04d}.png"),
+            dpi=300,
+        )
+
+
+# ------------------------- Pericenter compression yz-slices ----------------- #
+
+# Fixed slice location [R_sun] for the "fractional" probe; not tied to r_p
+# since it's a specific probe point for AMR timestep-limiting analysis (see
+# analysis/amrtimestep/amr_timestep.ipynb, the wide yz panel). The other
+# yz-slice check (pericenter_yz_check) slices at the actual r_p instead.
+_YZ_SLICE_X = 18.0
+
+# (field key, panel title, unit kind "cgs"/"lscale"/"mscale", scalar_map kwargs)
+_YZ_PANELS = [
+    ("density", "Density", "cgs", dict(label_latex=r"\rho", cmap="twilight")),
+    ("pressure", "Pressure", "cgs", dict(label_latex="P", cmap="rainbow")),
+    ("velocity", "Velocity", "cgs", dict(label_latex=r"|v|", cmap="cividis")),
+    ("temperature", "Temperature", "cgs", dict(label_latex="T", cmap="inferno")),
+    (
+        "dissipation",
+        "Dissipation",
+        "cgs",
+        dict(label_latex=r"\dot{E}_\mathrm{diss}", cmap="viridis"),
+    ),
+    (
+        "mach",
+        "Mach number",
+        "cgs",
+        dict(label_latex=r"|v|", unit_latex=r"c_s", cmap="plasma"),
+    ),
+    (
+        "erad",
+        "Radiation energy",
+        "cgs",
+        dict(label_latex=r"E_\mathrm{rad}", unit_latex=r"\mathrm{erg\,cm^{-3}}", cmap="magma"),
+    ),
+    (
+        "width",
+        "Cell width",
+        "lscale",
+        dict(label_latex="w", unit_latex=r"R_\odot", cmap="viridis"),
+    ),
+    (
+        "mass",
+        "Cell mass",
+        "mscale",
+        dict(label_latex="m", unit_latex=r"M_\odot", cmap="magma"),
+    ),
+]
+
+
+def _yz_panel_fields(snap) -> dict:
+    """9-panel fields shared by both yz pericenter-region slice checks."""
+    v_mag = np.sqrt(snap.Vx**2 + snap.Vy**2 + snap.Vz**2)
+    gamma_eff = snap.pressure / (snap.density * snap.internal_energy) + 1.0
+    cs = np.sqrt(np.abs(gamma_eff * snap.pressure / snap.density))
+    return {
+        "density": snap.density,
+        "pressure": snap.pressure,
+        "velocity": v_mag,
+        "temperature": snap.temperature,
+        "dissipation": snap.dissipation,
+        "mach": v_mag / cs,  # velocity/velocity -> already dimensionless
+        "erad": snap.Erad * snap.density,  # volumetric radiation energy [erg/cm^3]
+        "width": (3 * snap.volume / (4 * np.pi)) ** (1 / 3),  # sphere-equiv radius
+        "mass": _cell_mass(snap),
+    }
+
+
+def _yz_slice_check(snap, output_dir, snap_num, slice_x, rp, folder, title):
+    """Shared 3x3 yz-slice at x=slice_x [R_sun], 1024x512 res (wide in y).
+
+    Box: y=+-r_p, z=+-0.5 r_p (2:1 aspect, matching the resolution).
+    """
+    t_day = snap.time.to("day")
+    half_y, half_z = rp, 0.5 * rp
+    box = [-half_y.v, -half_z.v, half_y.v, half_z.v]
+
+    fields = _yz_panel_fields(snap)
+
+    fig, axes = plt.subplots(3, 3, figsize=(21, 11), constrained_layout=True)
+    fig.suptitle(rf"{title}  t = {t_day:.2f}", fontsize=16)
+
+    si, sysp, szsp = snap.to_2dgrid(res=(1024, 512), plane="yz", slice_coord=slice_x, box_size=box)
+
+    for ax, (key, ptitle, unit_kind, kw) in zip(axes.flat, _YZ_PANELS):
+        kw = dict(kw)
+        log_scale = kw.pop("log_scale", True)
+        raw = fields[key][si]
+        data = raw.in_base("cgs") if unit_kind == "cgs" else raw.to(getattr(richio.units, unit_kind))
+        if key == "dissipation":
+            vmin, vmax = _top_orders_range(data)
+            if vmin is not None:
+                kw.setdefault("vmin", vmin)
+                kw.setdefault("vmax", vmax)
+        scalar_map(data, sysp, szsp, ax=ax, log_scale=log_scale, **kw)
+        ax.set_title(ptitle)
+
+        if key == "velocity":
+            u_grid = snap.Vy[si].in_base("cgs").v.T
+            v_grid = snap.Vz[si].in_base("cgs").v.T
+            ax.streamplot(
+                sysp.v, szsp.v, u_grid, v_grid,
+                color="white", linewidth=0.6, density=1.3, arrowsize=0.7,
+            )
+
+    _savefig(fig, os.path.join(output_dir, f"figs/{folder}/snap{snap_num:04d}.png"), dpi=300)
+
+
+def yz_frac_pericenter_check(snap, input_file: str, output_dir: str, snap_num: int):
+    """yz-slice at the fixed x=_YZ_SLICE_X R_sun probe (a fraction of r_p, not r_p itself)."""
+    logger.info("Fractional-pericenter yz-slice check...")
+    R_rsun, Mstar_msun, Mbh_msun, beta = _parse_tde_params(input_file)
+    rp = R_rsun * (Mbh_msun / Mstar_msun) ** (1.0 / 3.0) / beta * richio.units.lscale
+    frac = _YZ_SLICE_X / rp.v
+    folder = f"{frac:.2f}rp_yz"
+    title = rf"${frac:.2f}\,r_p$ compression (yz-plane, $x={_YZ_SLICE_X:g}\,R_\odot$)"
+    _yz_slice_check(snap, output_dir, snap_num, _YZ_SLICE_X, rp, folder, title)
+
+
+def pericenter_yz_check(snap, input_file: str, output_dir: str, snap_num: int):
+    """yz-slice exactly at x=r_p (the true pericenter distance)."""
+    logger.info("Pericenter yz-slice check...")
+    R_rsun, Mstar_msun, Mbh_msun, beta = _parse_tde_params(input_file)
+    rp = R_rsun * (Mbh_msun / Mstar_msun) ** (1.0 / 3.0) / beta * richio.units.lscale
+    title = rf"Pericenter compression (yz-plane, $x=r_p={rp.v:.3g}\,R_\odot$)"
+    _yz_slice_check(snap, output_dir, snap_num, rp.v, rp, "pericenter_yz", title)
 
 
 # ----------------------------- Resolution check ----------------------------- #
 
 
 def resolution_check(snap, output_dir: str, snap_num: int):
-    """Plot cell-size distributions (by count and by mass).
-
-    Uses the cube root of cell volume as a proxy for the smoothing length *h*
-    and produces a two-panel histogram (cell count and mass-weighted) saved to
-    ``<output_dir>/figs/resolution_check_snap<NNNN>.png``.  Summary statistics
-    (min / median / max *h*) are written to the log.
-
-    :param snap: Loaded RICH snapshot object.
-    :param output_dir: Root output directory.
-    :type output_dir: str
-    :param snap_num: Snapshot index, used for output filenames.
-    :type snap_num: int
-    """
+    """Cell-size (sphere-equivalent radius) histograms, by count and by mass."""
     logger.info("Resolution check...")
-    h = snap.volume ** (1 / 3)  # cell-size proxy in code_length (R☉)
+    h = (3 * snap.volume / (4 * np.pi)) ** (1 / 3)  # sphere-equiv radius, code_length (R☉)
     mass = _cell_mass(snap)
 
     fig, axes = plt.subplots(2, 1, figsize=(7, 7), sharex=True, constrained_layout=True)
@@ -421,7 +633,7 @@ def resolution_check(snap, output_dir: str, snap_num: int):
         h.max(),
     )
     _savefig(
-        fig, os.path.join(output_dir, f"figs/resolution_check_snap{snap_num:04d}.png")
+        fig, os.path.join(output_dir, f"figs/resolution_check/snap{snap_num:04d}.png")
     )
 
 
@@ -429,22 +641,7 @@ def resolution_check(snap, output_dir: str, snap_num: int):
 
 
 def conservation_check(snap) -> dict:
-    """Compute global conserved quantities for a single snapshot.
-
-    Calculates total mass, kinetic / thermal / radiation energy components,
-    and the three components of angular momentum.  Results are logged at INFO
-    level and returned as a plain dictionary for caching or further analysis.
-
-    :param snap: Loaded RICH snapshot object.
-    :returns: Dictionary with keys:
-
-              * ``M_tot_g`` - total mass [g]
-              * ``E_kin_erg`` - total kinetic energy [erg]
-              * ``E_thm_erg`` - total thermal energy [erg]
-              * ``E_rad_erg`` - total radiation energy [erg]
-              * ``Lx``, ``Ly``, ``Lz`` - angular-momentum components [g cm² s⁻¹]
-    :rtype: dict
-    """
+    """Total mass and kinetic/thermal/radiation energy; logged and returned as a dict."""
     logger.info("Conservation / global budget...")
     mass = _cell_mass(snap)
 
@@ -452,25 +649,18 @@ def conservation_check(snap) -> dict:
     Ek = (0.5 * mass * (snap.Vx**2 + snap.Vy**2 + snap.Vz**2)).sum().to("erg")
     Et = (mass * snap.InternalEnergy).sum().to("erg")
     Er = (mass * snap.Erad).sum().to("erg")
-    Lx = (mass * (snap.Y * snap.Vz - snap.Z * snap.Vy)).sum().to("g*cm**2/s")
-    Ly = (mass * (snap.Z * snap.Vx - snap.X * snap.Vz)).sum().to("g*cm**2/s")
-    Lz = (mass * (snap.X * snap.Vy - snap.Y * snap.Vx)).sum().to("g*cm**2/s")
 
     logger.info("  M_total       = {:.4e}", M)
     logger.info("  E_kinetic     = {:.4e}", Ek)
     logger.info("  E_thermal     = {:.4e}", Et)
     logger.info("  E_radiation   = {:.4e}", Er)
     logger.info("  E_total       = {:.4e}", Ek + Et + Er)
-    logger.info("  L = ({:.3e}, {:.3e}, {:.3e})", Lx, Ly, Lz)
 
     return dict(
         M_tot_g=float(M.v),
         E_kin_erg=float(Ek.v),
         E_thm_erg=float(Et.v),
         E_rad_erg=float(Er.v),
-        Lx=float(Lx.v),
-        Ly=float(Ly.v),
-        Lz=float(Lz.v),
     )
 
 
@@ -478,16 +668,7 @@ def conservation_check(snap) -> dict:
 
 
 def compton_check(snap) -> float:
-    """Compute the hot-gas mass fraction as a Compton-cooling diagnostic.
-
-    Sums the mass of all cells with temperature above :data:`T_COMPTON`
-    (10⁸ K) and divides by the total mass.  A fraction exceeding 5 % triggers
-    a logged warning indicating that Compton cooling may be ineffective.
-
-    :param snap: Loaded RICH snapshot object.
-    :returns: Hot-gas mass fraction ∈ [0, 1].
-    :rtype: float
-    """
+    """Hot-gas (T > T_COMPTON) mass fraction; warns above 5%."""
     logger.info("Compton cooling check  (T > {})...", T_COMPTON)
     mass = _cell_mass(snap)
     frac = (mass[snap.temperature > T_COMPTON].sum() / mass.sum()).v
@@ -497,60 +678,11 @@ def compton_check(snap) -> float:
     return float(frac)
 
 
-# ------------------- Smoothing-length approximation check ------------------- #
-
-
-def smoothing_check(snap) -> dict:
-    """Assess the validity of the smoothing-length approximation.
-
-    Computes the fractions of total mass and total dissipation residing in
-    cells whose size *h* (cube root of volume) exceeds the median cell size.
-    Small fractions indicate that most mass and energy dissipation occur in
-    well-resolved regions, justifying the gradient / smoothing-length
-    approximation used by RICH.
-
-    :param snap: Loaded RICH snapshot object.
-    :returns: Dictionary with keys:
-
-              * ``f_mass_large_h`` - mass fraction in cells with h > median h
-              * ``f_diss_large_h`` - dissipation fraction in cells with h > median h
-    :rtype: dict
-    """
-    logger.info("Smoothing-length approximation check...")
-    h = snap.volume ** (1 / 3)
-    mass = _cell_mass(snap)
-    diss_w = snap.dissipation * snap.volume
-
-    h_med = np.median(h)
-    large = h > h_med
-
-    f_mass = (mass[large].sum() / mass.sum()).v
-    f_diss = (diss_w[large].sum() / diss_w.sum()).v
-
-    logger.info("  Median cell size h = {:.3e}", h_med)
-    logger.info("  Mass fraction  in h > h_median : {:.4f}", f_mass)
-    logger.info("  Diss fraction  in h > h_median : {:.4f}", f_diss)
-    return dict(f_mass_large_h=float(f_mass), f_diss_large_h=float(f_diss))
-
-
 # --------------- Time-evolution: dissipation & fluff fraction --------------- #
 
 
 def _scalars_for_snap(snap_path: str) -> dict:
-    """Extract all time-series scalar quantities from a single snapshot.
-
-    Loads the snapshot, computes conserved quantities and diagnostic fractions,
-    and returns them as plain Python floats suitable for JSON serialisation.
-    No figures are produced.
-
-    :param snap_path: Path to the ``.h5`` snapshot file.
-    :type snap_path: str
-    :returns: Dictionary with keys ``time_s``, ``M_tot_g``, ``E_kin_erg``,
-              ``E_thm_erg``, ``E_rad_erg``, ``Lx_cgs``, ``Ly_cgs``,
-              ``Lz_cgs``, ``diss_total_erg_s``, ``diss_fluff_frac``,
-              ``hot_mass_frac``.
-    :rtype: dict
-    """
+    """Scalar time-series quantities for one snapshot, as a JSON-safe dict."""
     snap = richio.load(snap_path)
     mass = _cell_mass(snap)
     diss_w = snap.dissipation * snap.volume
@@ -571,24 +703,7 @@ def _scalars_for_snap(snap_path: str) -> dict:
 
 
 def time_evolution_check(snap_path: str, output_dir: str):
-    """Build or update the scalar cache and produce time-evolution plots.
-
-    Scans the directory containing *snap_path* for all ``snap_*.h5`` files,
-    computes :func:`_scalars_for_snap` for any snapshot not yet in the JSON
-    cache (:data:`CACHE_FNAME`), and saves the updated cache.  Then generates
-    two multi-panel figures:
-
-    * ``time_evolution_physics.png`` - energy budget and total dissipation rate.
-    * ``time_evolution_numerics.png`` - mass conservation, fluff dissipation
-      fraction, and Compton cooling check.
-
-    :param snap_path: Path to any ``.h5`` snapshot in the run directory (used
-                      to locate sibling snapshots).
-    :type snap_path: str
-    :param output_dir: Root output directory; figures are written to the
-                       ``figs/`` sub-directory.
-    :type output_dir: str
-    """
+    """Cache scalars for every snap_*.h5 in the run dir, then plot the time series."""
     logger.info("Time-evolution checks...")
     cache_path = os.path.join(output_dir, CACHE_FNAME)
     cache: dict = {}
@@ -617,9 +732,6 @@ def time_evolution_check(snap_path: str, output_dir: str):
     Ek = np.array([cache[k]["E_kin_erg"] for k in keys])
     Et = np.array([cache[k]["E_thm_erg"] for k in keys])
     Er = np.array([cache[k]["E_rad_erg"] for k in keys])
-    # Lx   = np.array([cache[k]["Lx_cgs"]           for k in keys])
-    # Ly   = np.array([cache[k]["Ly_cgs"]           for k in keys])
-    # Lz   = np.array([cache[k]["Lz_cgs"]           for k in keys])
     D = np.array([cache[k]["diss_total_erg_s"] for k in keys])
     Df = np.array([cache[k]["diss_fluff_frac"] for k in keys])
     Th = np.array([cache[k]["hot_mass_frac"] for k in keys])
@@ -673,8 +785,10 @@ _ALL_CHECKS = (
     "conservation",
     "compton",
     "time_evolution",
-    "slices",
-    "pericenter",
+    "slice",
+    "projection",
+    "pericenter_yz",
+    "yz_frac_pericenter",
 )
 
 
@@ -703,7 +817,7 @@ def main(
     Examples:
       python diagnostics.py snap.h5               # run all checks
       python diagnostics.py snap.h5 -c integrity  # integrity only
-      python diagnostics.py snap.h5 -c time_evolution -c slices
+      python diagnostics.py snap.h5 -c time_evolution -c slice
     """
     if checks:
         unknown = set(checks) - set(_ALL_CHECKS)
@@ -732,8 +846,10 @@ def main(
         "resolution",
         "conservation",
         "compton",
-        "slices",
-        "pericenter",
+        "slice",
+        "projection",
+        "pericenter_yz",
+        "yz_frac_pericenter",
     }
     snap = None
     if _needs_snap:
@@ -750,11 +866,22 @@ def main(
     if "compton" in run:
         compton_check(snap)
 
-    if "slices" in run:
-        slice_proj_check(snap, output_dir, snap_num)
+    if "slice" in run:
+        fields = _nine_panel_fields(snap, input_file)
+        slice_check(snap, fields, input_file, output_dir, snap_num)
+        # ~11 per-cell arrays; drop them before the later checks allocate
+        # their own grids, or a big snapshot can exhaust memory part-way.
+        del fields
+        gc.collect()
 
-    if "pericenter" in run:
-        pericenter_check(snap, input_file, output_dir, snap_num)
+    if "projection" in run:
+        projection_check(snap, input_file, output_dir, snap_num)
+
+    if "pericenter_yz" in run:
+        pericenter_yz_check(snap, input_file, output_dir, snap_num)
+
+    if "yz_frac_pericenter" in run:
+        yz_frac_pericenter_check(snap, input_file, output_dir, snap_num)
 
     if "time_evolution" in run:
         time_evolution_check(input_file, output_dir)

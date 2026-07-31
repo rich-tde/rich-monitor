@@ -4,9 +4,11 @@ Dispatch diagnostics.py for snapshots in a directory.
 By default, only the latest snapshot is processed (pass --all to process all).
 A snapshot is considered "done" when:
   1. Its entry exists in diagnostics_cache.json, AND
-  2. At least N_EXPECTED_PNGS files matching *_snap{NNNN}*.png exist in output_dir.
+  2. At least N_EXPECTED_PNGS_PER_SNAP files exist for it in
+     output_dir/figs/{series}/snap{NNNN}.png (one series subfolder per check).
 
-To add/remove a check in diagnostics.py that produces a PNG: update N_EXPECTED_PNGS.
+N_EXPECTED_PNGS_PER_SNAP is imported from diagnostics.py, derived from its own
+check config — no manual sync needed here when checks are added/removed.
 
 This script also integrates measure_speed.py to process Snellius benchmark logs
 that match the simulation parameters extracted from the snapshot directory name.
@@ -33,7 +35,7 @@ from pathlib import Path
 from typing import List, Optional
 
 import typer
-from diagnostics import CACHE_FNAME, _snap_num
+from diagnostics import CACHE_FNAME, N_EXPECTED_PNGS_PER_SNAP, _snap_num
 from loguru import logger
 from progress_monitor import _parse_job_name, _parse_run_params
 
@@ -45,10 +47,6 @@ _SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "diagnostics.
 _MEASURE_SPEED_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "measure_speed.py")
 _LOG_DIR = "/data2/yujiehe/rich-monitor/snellius-backup/logs"
 
-# Per-snapshot PNG-producing checks: 3×slice_proj (xy/xz/yz), 3×pericenter (xy/xz/yz), resolution_check.
-# Update when adding/removing checks in diagnostics.py that write a PNG.
-N_EXPECTED_PNGS = 7
-
 # --------------------------------- Helpers ---------------------------------- #
 
 
@@ -57,13 +55,13 @@ def _is_full(snap_path: str) -> bool:
 
 
 def _n_pngs(n: int, output_dir: str) -> int:
-    """Count PNG files for this snapshot number in output_dir."""
-    return len(glob.glob(os.path.join(output_dir, f"figs/*_snap{n:04d}*.png")))
+    """Count PNG files for this snapshot number across figs/{series}/ folders."""
+    return len(glob.glob(os.path.join(output_dir, f"figs/*/snap{n:04d}.png")))
 
 
 def _is_done(snap_path: str, output_dir: str, cache: dict) -> bool:
     n = _snap_num(snap_path)
-    return str(n) in cache and _n_pngs(n, output_dir) >= N_EXPECTED_PNGS
+    return str(n) in cache and _n_pngs(n, output_dir) >= N_EXPECTED_PNGS_PER_SNAP
 
 
 def _load_cache(output_dir: str) -> dict:
@@ -171,6 +169,20 @@ def main(
         "--log-dir",
         help="Directory containing benchmark logs.",
     ),
+    checks: Optional[List[str]] = typer.Option(
+        None,
+        "--check",
+        "-c",
+        help=(
+            "Passthrough to diagnostics.py's --check/-c (repeat for multiple). "
+            "Default: run all checks. Note: completion detection here always "
+            "expects the full N_EXPECTED_PNGS_PER_SNAP count regardless of this "
+            "filter — a snapshot missing e.g. resolution_check will never "
+            "register as done if only ever run with a restricted subset. "
+            "Intended for one-off backfills of snapshots that already have "
+            "baseline coverage from a prior full run."
+        ),
+    ),
 ):
     os.makedirs(output_dir, exist_ok=True)
     log_sink = logger.add(os.path.join(output_dir, "dispatch.log"), mode="a")
@@ -214,7 +226,7 @@ def main(
         reason = (
             "overwrite"
             if force
-            else f"incomplete ({_n_pngs(n, output_dir)}/{N_EXPECTED_PNGS} PNGs)"
+            else f"incomplete ({_n_pngs(n, output_dir)}/{N_EXPECTED_PNGS_PER_SNAP} PNGs)"
         )
         if dry_run:
             logger.info(
@@ -223,7 +235,10 @@ def main(
             continue
 
         logger.info("Running diagnostics for snap_{} ({})", n, reason)
-        result = subprocess.run([sys.executable, _SCRIPT, snap_path, output_dir])
+        check_args = [a for c in (checks or []) for a in ("--check", c)]
+        result = subprocess.run(
+            [sys.executable, _SCRIPT, snap_path, output_dir] + check_args
+        )
         if result.returncode == 0:
             cache = _load_cache(output_dir)  # refresh for next iteration
             n_run += 1
