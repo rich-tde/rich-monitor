@@ -7,17 +7,16 @@ Queries sacct from Snellius (via SSH), caches results, and writes a CSV report.
 import csv
 import json
 import os
-import subprocess
 import re
+import subprocess
 from datetime import date, timedelta
-from typing import Optional
 
-import unyt as u
 import typer
+import unyt as u
+from diagnostics import _snap_num
 from loguru import logger
 
 import richio
-from diagnostics import _snap_num
 
 app = typer.Typer()
 
@@ -82,7 +81,7 @@ def _parse_run_params(path: str) -> tuple:
     """
     float_capture = r"([+-]?[0-9]*[.]?[0-9]+)"
     # https://stackoverflow.com/questions/12643009/regular-expression-for-floating-point-numbers
-    m = re.search("R{0}M{0}BH{0}beta{0}S{0}n{0}".format(float_capture), path)
+    m = re.search(f"R{float_capture}M{float_capture}BH{float_capture}beta{float_capture}S{float_capture}n{float_capture}", path)
     if m:
         return tuple(float(x) for x in m.group(1, 2, 3, 4, 6))
     else:
@@ -247,12 +246,12 @@ def _parse_job_name(name: str) -> dict | None:
     m = re.fullmatch(r"M(\d+)R(\d+)MBH([0-9e+]+)beta([0-9.]+)", name, re.IGNORECASE)
     if not m:
         return None
-    return dict(
-        Mstar=_undot(m.group(1)),
-        R=_undot(m.group(2)),
-        Mbh=float(m.group(3)),
-        beta=float(m.group(4)),
-    )
+    return {
+        "Mstar": _undot(m.group(1)),
+        "R": _undot(m.group(2)),
+        "Mbh": float(m.group(3)),
+        "beta": float(m.group(4)),
+    }
 
 
 def _get_latest_snap_info(input_dir: str) -> dict:
@@ -294,13 +293,13 @@ def _get_latest_snap_info(input_dir: str) -> dict:
         point_num = len(snap)
 
         key = _canonical_name(R, Mstar, Mbh, beta)
-        result[key] = dict(
-            snapnum=snapnum,
-            time_day=round(time_day, 4),
-            time_in_tfb=round(time_in_tfb, 4),
-            cycle=cycle,
-            point_num=point_num,
-        )
+        result[key] = {
+            "snapnum": snapnum,
+            "time_day": round(time_day, 4),
+            "time_in_tfb": round(time_in_tfb, 4),
+            "cycle": cycle,
+            "point_num": point_num,
+        }
         logger.info(
             "  {} → snap_{}, t={:.3f} day ({:.3f} tfb), cycle {}, N={}",
             entry,

@@ -1,0 +1,9 @@
+[lint]
+extend-select = [
+    "I",   # Organize imports
+    "C4",  # Simplify collection calls/comprehensions
+]
+unfixable = ["F401"]  # Report unused imports, but never remove them
+
+# Allow automatic fixes for unnecessary dict()/list()/tuple() calls
+extend-safe-fixes = ["C408"]

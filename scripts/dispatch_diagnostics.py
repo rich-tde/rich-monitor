@@ -32,7 +32,6 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import List, Optional
 
 import typer
 from diagnostics import CACHE_FNAME, N_EXPECTED_PNGS_PER_SNAP, _snap_num
@@ -44,7 +43,9 @@ app = typer.Typer()
 # --------------------------------- Defaults --------------------------------- #
 
 _SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "diagnostics.py")
-_MEASURE_SPEED_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "measure_speed.py")
+_MEASURE_SPEED_SCRIPT = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "measure_speed.py"
+)
 _LOG_DIR = "/data2/yujiehe/rich-monitor/snellius-backup/logs"
 
 # --------------------------------- Helpers ---------------------------------- #
@@ -82,7 +83,7 @@ def _find_snaps(snap_dir: str) -> list:
 # --------------------------------- Speed Measurement --------------------------------- #
 
 
-def _find_log_files(snap_dir: str, log_dir: str = _LOG_DIR) -> List[Path]:
+def _find_log_files(snap_dir: str, log_dir: str = _LOG_DIR) -> list[Path]:
     """Find log files in log_dir whose SLURM job name matches snap_dir's parameters."""
     try:
         R, Mstar, Mbh, beta, _ = _parse_run_params(snap_dir)
@@ -150,7 +151,7 @@ def main(
     overwrite_nonfull: bool = typer.Option(
         False, "--overwrite-nonfull", help="Rerun snap_*.h5 (non-full) snapshots."
     ),
-    overwrite_snaps: Optional[List[int]] = typer.Option(
+    overwrite_snaps: list[int] | None = typer.Option(
         None,
         "--overwrite-snap",
         help="Rerun a specific snapshot number (repeat for multiple).",
@@ -162,14 +163,16 @@ def main(
         False, "--dry-run", help="Print what would run without running."
     ),
     measure_speed: bool = typer.Option(
-        True, "--measure-speed/--no-measure-speed", help="Skip benchmark log processing."
+        True,
+        "--measure-speed/--no-measure-speed",
+        help="Skip benchmark log processing.",
     ),
     log_dir: str = typer.Option(
         _LOG_DIR,
         "--log-dir",
         help="Directory containing benchmark logs.",
     ),
-    checks: Optional[List[str]] = typer.Option(
+    checks: list[str] | None = typer.Option(
         None,
         "--check",
         "-c",

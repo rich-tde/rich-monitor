@@ -4,7 +4,6 @@ import glob
 import os
 import re
 from pathlib import Path
-from typing import List
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -46,15 +45,15 @@ def parse_file(path: Path) -> dict:
             time.append(float(t))
             dt.append(float(d))
 
-    return dict(
-        partition=partition,
-        ncores=ncores,
-        perf=np.array(perf),
-        ncells=np.array(ncells),
-        cycle=np.array(cycle),
-        time=np.array(time),
-        dt=np.array(dt),
-    )
+    return {
+        "partition": partition,
+        "ncores": ncores,
+        "perf": np.array(perf),
+        "ncells": np.array(ncells),
+        "cycle": np.array(cycle),
+        "time": np.array(time),
+        "dt": np.array(dt),
+    }
 
 
 def rolave(data, window):
@@ -69,7 +68,7 @@ def rolave(data, window):
 
 @app.command()
 def main(
-    input_files: List[str] = typer.Argument(
+    input_files: list[str] = typer.Argument(
         help="Input RICH output file(s) or glob pattern(s)", default=[INPUT_FILE]
     ),
     output_dir: str = typer.Option(
@@ -113,7 +112,7 @@ def main(
 
         try:
             rec = parse_file(p)
-        except Exception as e:
+        except Exception:
             # typer.echo(f"Skipping {p.name}: {e}", err=True)
             continue
 

@@ -16,8 +16,8 @@ Per-run inputs (see RUNS list):
 SBU = core-hours on Snellius.
 """
 
-from dataclasses import dataclass
 import math
+from dataclasses import dataclass
 
 # ---------------------------------------------------------------------------
 # Constants

@@ -7,7 +7,6 @@ import glob
 import json
 import os
 import re
-from typing import List, Optional
 
 import matplotlib.colors as mcolors
 import matplotlib.patches as mpatches
@@ -16,9 +15,9 @@ import numpy as np
 import typer
 import unyt as u
 from loguru import logger
+from richio.plots import scalar_map
 
 import richio
-from richio.plots import scalar_map
 
 app = typer.Typer()
 
@@ -103,7 +102,7 @@ def integrity_check(snap_path: str) -> list[str]:
 def _parse_tde_params(path: str) -> tuple:
     """Extract (R_star [Rsun], Mstar [Msun], Mbh [Msun], beta) from a path."""
     float_capture = r"([+-]?[0-9]*[.]?[0-9]+)"
-    m = re.search(r"R{0}M{0}BH{0}beta{0}".format(float_capture), path)
+    m = re.search(rf"R{float_capture}M{float_capture}BH{float_capture}beta{float_capture}", path)
     if not m:
         raise ValueError(f"Cannot parse TDE params from path: {path}")
     R, Mstar, Mbh, beta = (float(x) for x in m.group(1, 2, 3, 4))
@@ -168,7 +167,9 @@ def _nine_panel_fields(snap, input_file: str) -> dict:
     )
 
     tfb = np.sqrt(-(np.pi**2) / 2 * (u.G * Mbh) ** 2 / soe**3)
-    tfb_min = np.pi / np.sqrt(2) * Rstar**1.5 / np.sqrt(u.G * Mstar) * np.sqrt(Mbh / Mstar)
+    tfb_min = (
+        np.pi / np.sqrt(2) * Rstar**1.5 / np.sqrt(u.G * Mstar) * np.sqrt(Mbh / Mstar)
+    )
 
     return {
         "density": snap.density,
@@ -205,49 +206,53 @@ _BERNOULLI_CMAP = _no_white_diverging()
 
 # (key, panel title, scalar_map kwargs; log_scale defaults True unless given)
 _NINE_PANELS = [
-    ("density", "Density", dict(label_latex=r"\rho", cmap="twilight")),
-    ("pressure", "Pressure", dict(label_latex="P", cmap="rainbow")),
-    ("velocity", "Velocity", dict(label_latex=r"|v|", cmap="cividis")),
-    ("temperature", "Temperature", dict(label_latex="T", cmap="inferno")),
+    ("density", "Density", {"label_latex": r"\rho", "cmap": "twilight"}),
+    ("pressure", "Pressure", {"label_latex": "P", "cmap": "rainbow"}),
+    ("velocity", "Velocity", {"label_latex": r"|v|", "cmap": "cividis"}),
+    ("temperature", "Temperature", {"label_latex": "T", "cmap": "inferno"}),
     (
         "dissipation",
         "Dissipation",
-        dict(label_latex=r"\dot{E}_\mathrm{diss}", cmap="viridis"),
+        {"label_latex": r"\dot{E}_\mathrm{diss}", "cmap": "viridis"},
     ),
     (
         "mach",
         "Mach number",
-        dict(label_latex=r"|v|", unit_latex=r"c_s", cmap="plasma"),
+        {"label_latex": r"|v|", "unit_latex": r"c_s", "cmap": "plasma"},
     ),
     (
         "erad",
         "Radiation energy",
-        dict(label_latex=r"E_\mathrm{rad}", unit_latex=r"\mathrm{erg\,cm^{-3}}", cmap="magma"),
+        {
+            "label_latex": r"E_\mathrm{rad}",
+            "unit_latex": r"\mathrm{erg\,cm^{-3}}",
+            "cmap": "magma",
+        },
     ),
     (
         "bernoulli",
         "Bernoulli parameter",
-        dict(
-            label_latex=r"\mathrm{sgn}(\mathrm{Be})\log_{10}|\mathrm{Be}",
-            unit_latex=r"\Delta\epsilon|",
-            cmap=_BERNOULLI_CMAP,
-            log_scale=False,
-        ),
+        {
+            "label_latex": r"\mathrm{sgn}(\mathrm{Be})\log_{10}|\mathrm{Be}",
+            "unit_latex": r"\Delta\epsilon|",
+            "cmap": _BERNOULLI_CMAP,
+            "log_scale": False,
+        },
     ),
     (
         "tfb_ratio",
         "Fallback time",
-        dict(
-            label_latex=r"t_\mathrm{fb}",
-            unit_latex=r"t_\mathrm{min}",
-            cmap="rainbow",
+        {
+            "label_latex": r"t_\mathrm{fb}",
+            "unit_latex": r"t_\mathrm{min}",
+            "cmap": "rainbow",
             # Explicit range: tfb spans ~18 decades, so the automatic top-6
             # clip would land far above the physically interesting band.
             # Focused on the most-bound debris that sets the early fallback
             # rate (0.1 - ~2 t_min); longer-tfb material saturates.
-            vmin=-1.0,
-            vmax=0.3,
-        ),
+            "vmin": -1.0,
+            "vmax": 0.3,
+        },
     ),
 ]
 
@@ -309,13 +314,23 @@ def _draw_circles(axes, box, circles):
         for radius, label in circles:
             ax.add_patch(
                 mpatches.Circle(
-                    (0, 0), radius, fill=False, linestyle="--", color="white",
-                    linewidth=1, zorder=5,
+                    (0, 0),
+                    radius,
+                    fill=False,
+                    linestyle="--",
+                    color="white",
+                    linewidth=1,
+                    zorder=5,
                 )
             )
             ax.annotate(
-                label, xy=(0, radius), color="white", fontsize=9,
-                ha="center", va="bottom", zorder=6,
+                label,
+                xy=(0, radius),
+                color="white",
+                fontsize=9,
+                ha="center",
+                va="bottom",
+                zorder=6,
             )
         ax.set_xlim(box[0].v, box[3].v)
         ax.set_ylim(box[1].v, box[4].v)
@@ -345,7 +360,9 @@ PNG_SERIES_PER_SNAP = {
     "resolution": ["resolution_check"],
     "slice": [f"slice_{size}_xy" for size in _BOX_SCALES],
     "projection": [
-        f"proj_{size}_{plane}" for size in _PROJECTION_SIZES for plane, _ax in _PROJECTION_PLANES
+        f"proj_{size}_{plane}"
+        for size in _PROJECTION_SIZES
+        for plane, _ax in _PROJECTION_PLANES
     ],
     "pericenter_yz": ["pericenter_yz"],
     # folder name is computed at runtime from r_p (see yz_frac_pericenter_check);
@@ -374,7 +391,9 @@ def slice_check(snap, fields: dict, input_file: str, output_dir: str, snap_num: 
             fontsize=16,
         )
 
-        si, sxsp, sysp = snap.to_2dgrid(res=512, plane="xy", slice_coord=0, box_size=box)
+        si, sxsp, sysp = snap.to_2dgrid(
+            res=512, plane="xy", slice_coord=0, box_size=box
+        )
         _plot_nine_panels(fields, si, sxsp, sysp, axes)
         _draw_circles(axes, box, circles)
 
@@ -459,13 +478,21 @@ def projection_check(snap, input_file: str, output_dir: str, snap_num: int):
                 if vmin is not None:
                     kw["vmin"], kw["vmax"] = vmin, vmax
             scalar_map(
-                projected, pxsp, pysp, ax=ax,
-                label_latex=label, cmap=cmap, unit_latex=unit_latex, **kw,
+                projected,
+                pxsp,
+                pysp,
+                ax=ax,
+                label_latex=label,
+                cmap=cmap,
+                unit_latex=unit_latex,
+                **kw,
             )
 
         _savefig(
             fig,
-            os.path.join(output_dir, f"figs/proj_{size}_{plane}/snap{snap_num:04d}.png"),
+            os.path.join(
+                output_dir, f"figs/proj_{size}_{plane}/snap{snap_num:04d}.png"
+            ),
             dpi=300,
         )
 
@@ -480,39 +507,43 @@ _YZ_SLICE_X = 18.0
 
 # (field key, panel title, unit kind "cgs"/"lscale"/"mscale", scalar_map kwargs)
 _YZ_PANELS = [
-    ("density", "Density", "cgs", dict(label_latex=r"\rho", cmap="twilight")),
-    ("pressure", "Pressure", "cgs", dict(label_latex="P", cmap="rainbow")),
-    ("velocity", "Velocity", "cgs", dict(label_latex=r"|v|", cmap="cividis")),
-    ("temperature", "Temperature", "cgs", dict(label_latex="T", cmap="inferno")),
+    ("density", "Density", "cgs", {"label_latex": r"\rho", "cmap": "twilight"}),
+    ("pressure", "Pressure", "cgs", {"label_latex": "P", "cmap": "rainbow"}),
+    ("velocity", "Velocity", "cgs", {"label_latex": r"|v|", "cmap": "cividis"}),
+    ("temperature", "Temperature", "cgs", {"label_latex": "T", "cmap": "inferno"}),
     (
         "dissipation",
         "Dissipation",
         "cgs",
-        dict(label_latex=r"\dot{E}_\mathrm{diss}", cmap="viridis"),
+        {"label_latex": r"\dot{E}_\mathrm{diss}", "cmap": "viridis"},
     ),
     (
         "mach",
         "Mach number",
         "cgs",
-        dict(label_latex=r"|v|", unit_latex=r"c_s", cmap="plasma"),
+        {"label_latex": r"|v|", "unit_latex": r"c_s", "cmap": "plasma"},
     ),
     (
         "erad",
         "Radiation energy",
         "cgs",
-        dict(label_latex=r"E_\mathrm{rad}", unit_latex=r"\mathrm{erg\,cm^{-3}}", cmap="magma"),
+        {
+            "label_latex": r"E_\mathrm{rad}",
+            "unit_latex": r"\mathrm{erg\,cm^{-3}}",
+            "cmap": "magma",
+        },
     ),
     (
         "width",
         "Cell width",
         "lscale",
-        dict(label_latex="w", unit_latex=r"R_\odot", cmap="viridis"),
+        {"label_latex": "w", "unit_latex": r"R_\odot", "cmap": "viridis"},
     ),
     (
         "mass",
         "Cell mass",
         "mscale",
-        dict(label_latex="m", unit_latex=r"M_\odot", cmap="magma"),
+        {"label_latex": "m", "unit_latex": r"M_\odot", "cmap": "magma"},
     ),
 ]
 
@@ -549,13 +580,19 @@ def _yz_slice_check(snap, output_dir, snap_num, slice_x, rp, folder, title):
     fig, axes = plt.subplots(3, 3, figsize=(21, 11), constrained_layout=True)
     fig.suptitle(rf"{title}  t = {t_day:.2f}", fontsize=16)
 
-    si, sysp, szsp = snap.to_2dgrid(res=(1024, 512), plane="yz", slice_coord=slice_x, box_size=box)
+    si, sysp, szsp = snap.to_2dgrid(
+        res=(1024, 512), plane="yz", slice_coord=slice_x, box_size=box
+    )
 
     for ax, (key, ptitle, unit_kind, kw) in zip(axes.flat, _YZ_PANELS):
         kw = dict(kw)
         log_scale = kw.pop("log_scale", True)
         raw = fields[key][si]
-        data = raw.in_base("cgs") if unit_kind == "cgs" else raw.to(getattr(richio.units, unit_kind))
+        data = (
+            raw.in_base("cgs")
+            if unit_kind == "cgs"
+            else raw.to(getattr(richio.units, unit_kind))
+        )
         if key == "dissipation":
             vmin, vmax = _top_orders_range(data)
             if vmin is not None:
@@ -568,11 +605,19 @@ def _yz_slice_check(snap, output_dir, snap_num, slice_x, rp, folder, title):
             u_grid = snap.Vy[si].in_base("cgs").v.T
             v_grid = snap.Vz[si].in_base("cgs").v.T
             ax.streamplot(
-                sysp.v, szsp.v, u_grid, v_grid,
-                color="white", linewidth=0.6, density=1.3, arrowsize=0.7,
+                sysp.v,
+                szsp.v,
+                u_grid,
+                v_grid,
+                color="white",
+                linewidth=0.6,
+                density=1.3,
+                arrowsize=0.7,
             )
 
-    _savefig(fig, os.path.join(output_dir, f"figs/{folder}/snap{snap_num:04d}.png"), dpi=300)
+    _savefig(
+        fig, os.path.join(output_dir, f"figs/{folder}/snap{snap_num:04d}.png"), dpi=300
+    )
 
 
 def yz_frac_pericenter_check(snap, input_file: str, output_dir: str, snap_num: int):
@@ -601,7 +646,9 @@ def pericenter_yz_check(snap, input_file: str, output_dir: str, snap_num: int):
 def resolution_check(snap, output_dir: str, snap_num: int):
     """Cell-size (sphere-equivalent radius) histograms, by count and by mass."""
     logger.info("Resolution check...")
-    h = (3 * snap.volume / (4 * np.pi)) ** (1 / 3)  # sphere-equiv radius, code_length (R☉)
+    h = (3 * snap.volume / (4 * np.pi)) ** (
+        1 / 3
+    )  # sphere-equiv radius, code_length (R☉)
     mass = _cell_mass(snap)
 
     fig, axes = plt.subplots(2, 1, figsize=(7, 7), sharex=True, constrained_layout=True)
@@ -656,12 +703,12 @@ def conservation_check(snap) -> dict:
     logger.info("  E_radiation   = {:.4e}", Er)
     logger.info("  E_total       = {:.4e}", Ek + Et + Er)
 
-    return dict(
-        M_tot_g=float(M.v),
-        E_kin_erg=float(Ek.v),
-        E_thm_erg=float(Et.v),
-        E_rad_erg=float(Er.v),
-    )
+    return {
+        "M_tot_g": float(M.v),
+        "E_kin_erg": float(Ek.v),
+        "E_thm_erg": float(Et.v),
+        "E_rad_erg": float(Er.v),
+    }
 
 
 # --------------------- Compton cooling: hot-gas fraction -------------------- #
@@ -688,18 +735,18 @@ def _scalars_for_snap(snap_path: str) -> dict:
     diss_w = snap.dissipation * snap.volume
     fluff = _fluff_mask(snap)
 
-    return dict(
-        time_s=float(snap.time.to("s").v),
-        M_tot_g=float(mass.sum().to("g").v),
-        E_kin_erg=float(
+    return {
+        "time_s": float(snap.time.to("s").v),
+        "M_tot_g": float(mass.sum().to("g").v),
+        "E_kin_erg": float(
             (0.5 * mass * (snap.Vx**2 + snap.Vy**2 + snap.Vz**2)).sum().to("erg").v
         ),
-        E_thm_erg=float((mass * snap.InternalEnergy).sum().to("erg").v),
-        E_rad_erg=float((mass * snap.Erad).sum().to("erg").v),
-        diss_total_erg_s=float(diss_w.sum().to("erg/s").v),
-        diss_fluff_frac=float((diss_w[fluff].sum() / diss_w.sum()).v),
-        hot_mass_frac=float((mass[snap.temperature > T_COMPTON].sum() / mass.sum()).v),
-    )
+        "E_thm_erg": float((mass * snap.InternalEnergy).sum().to("erg").v),
+        "E_rad_erg": float((mass * snap.Erad).sum().to("erg").v),
+        "diss_total_erg_s": float(diss_w.sum().to("erg/s").v),
+        "diss_fluff_frac": float((diss_w[fluff].sum() / diss_w.sum()).v),
+        "hot_mass_frac": float((mass[snap.temperature > T_COMPTON].sum() / mass.sum()).v),
+    }
 
 
 def time_evolution_check(snap_path: str, output_dir: str):
@@ -801,7 +848,7 @@ def main(
         default="./",
         help="Output directory for figures and cache.",
     ),
-    checks: Optional[List[str]] = typer.Option(
+    checks: list[str] | None = typer.Option(
         None,
         "--check",
         "-c",
