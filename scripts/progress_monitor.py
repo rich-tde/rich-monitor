@@ -287,9 +287,10 @@ def _get_latest_snap_info(input_dir: str) -> dict:
         snap = richio.load(os.path.join(run_path, latest_file))
 
         time = snap.time.to("day")
-        time_day = float(time.v)
-        time_in_tfb = float((time / tfb).v)
-        cycle = int(snap.cycle)
+        # Snapshot metadata may be scalar or stored in a single-element array.
+        time_day = float(time.v.item())
+        time_in_tfb = float((time / tfb).v.item())
+        cycle = int(snap.cycle.item())
         point_num = len(snap)
 
         key = _canonical_name(R, Mstar, Mbh, beta)
