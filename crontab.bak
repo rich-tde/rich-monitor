@@ -3,6 +3,9 @@ SHELL=/bin/bash
 # Copy from snellius scratch shared
 0 */8 * * * bash /data2/yujiehe/rich-monitor/scripts/backup_snellius_scratch.sh
 
+# Backup the home folder
+10 */8 * * * bash /data2/yujiehe/rich-monitor/scripts/backup_snellius_home.sh
+
 # Run diagnostiscs on the latest snapshot
 20 */8 * * * bash /data2/yujiehe/rich-monitor/scripts/run_dispatch.sh /disks/emrdata/YujieSnellius/R0.47M0.5BH100000beta1S60n1.5ComptonHiResNewAMR/ /data1/yujiehe/snellius-logs/
 
@@ -12,5 +15,3 @@ SHELL=/bin/bash
 # Do progress monitor
 45 6 * * * bash /data2/yujiehe/rich-monitor/scripts/run_monitor.sh /disks/emrdata/YujieSnellius/ /data1/yujiehe/snellius-logs/
 
-# Backup the home folder
-45 */8 * * * bash /data2/yujiehe/rich-monitor/scripts/backup_snellius_home.sh
