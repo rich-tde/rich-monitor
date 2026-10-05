@@ -156,7 +156,7 @@ def _nine_panel_fields(snap, input_file: str) -> dict:
     dr[dr <= 0] = np.nan  # inside the horizon: undefined, not "extremely bound"
     phi = u.G * Mbh / dr
     soe = 0.5 * v_mag**2 - phi  # specific orbital energy (no pressure term)
-    bernoulli = 0.5 * v_mag**2 + snap.pressure / snap.density + snap.Erad / 3.0 - phi
+    bernoulli = 0.5 * v_mag**2 + snap.pressure / snap.density + snap.Erad * 4.0 / 3.0 - phi
     # Signed log of the (dimensionless) Bernoulli / energy-spread ratio. The
     # .to("dimensionless") both validates dimensionlessness and simplifies the
     # mixed code+cgs units; numpy's log10/sign then return a bare ndarray, so
