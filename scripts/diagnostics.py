@@ -126,7 +126,7 @@ def _nine_panel_fields(snap, input_file: str) -> dict:
     Direct fields (density, pressure, temperature, dissipation, Erad) plus
     derived diagnostics: speed, Mach number, fallback time in units of t_min
     (see analysis/amrtimestep/orbital_energy.ipynb), and the Bernoulli
-    parameter ``Be = 1/2 v^2 + P/rho + E_rad/3 - Phi`` (>0 => locally
+    parameter ``Be = 1/2 v^2 + P/rho + E_rad*4/3 - Phi`` (>0 => locally
     unbound, BH at origin) shown as ``sgn(Be) log10(|Be / delta_eps|)`` — the
     standard signed-log transform for a quantity that spans many orders of
     magnitude on both sides of zero — where ``delta_eps = G Mbh Rstar / Rt^2``
