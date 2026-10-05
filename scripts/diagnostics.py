@@ -342,7 +342,7 @@ def _draw_circles(axes, box, circles):
 # Replaces the old separate pericenter/apocenter zoom-in checks.
 _BOX_SCALES = {
     "small": ("rp", 1.75),
-    "middle": ("ra", 0.6),
+    "middle": ("ra", 1.0),
     "big": ("ra", 2.0),
 }
 
