@@ -281,10 +281,9 @@ def _plot_nine_panels(fields: dict, si, sxsp, sysp, axes):
             # Robust (percentile) symmetric range: already signed-log
             # transformed, but a handful of cells right at r=0 still diverge
             # (log|Be| -> +inf) and can otherwise wash out the whole panel.
-            finite = data.v[np.isfinite(data.v)]
-            vmax = float(np.percentile(np.abs(finite), 99.5)) if finite.size else 1.0
-            kw.setdefault("vmin", -vmax)
-            kw.setdefault("vmax", vmax)
+            vmax = 1.0
+            kw.setdefault("vmin", -1.0)
+            kw.setdefault("vmax", 1.0)
         elif key == "dissipation":
             vmin, vmax = _top_orders_range(data)
             if vmin is not None:
