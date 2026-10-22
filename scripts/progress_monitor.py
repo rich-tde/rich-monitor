@@ -6,10 +6,11 @@ SYNOPSIS
     Both positional arguments are required, in the order shown.
 
 DESCRIPTION
-    Query Slurm sacct on Snellius over SSH and combine the job records with
-    local snapshot metadata. Write a CSV containing job states, wall/core
-    hours, and per-run summaries. Read the highest-numbered .h5 snapshot for
-    each recognized run directory. Print progress messages and append a log.
+    Query Slurm sacct on Snellius over SSH for all users in SNELLIUS_ACCOUNT
+    and combine the job records with local snapshot metadata. Write a CSV
+    containing users, job states, wall/core hours, and per-user/run summaries.
+    Read the highest-numbered .h5 snapshot for each recognized run directory.
+    Print progress messages and append a log.
 
 ARGUMENTS
     INPUT_DIR
@@ -49,13 +50,19 @@ FILES
 
 NOTES
     Configuration is in Python constants, not command-line options:
-        SNELLIUS_HOST   SSH alias (default: snellius).
-        SNELLIUS_USER   Accounting user (default: yhe).
-        PROJECT_START   First accounting date (default: 2026-03-01).
-        SBU_BUDGET      Project core-hour budget (default: 22,300,000).
+        SNELLIUS_HOST      SSH alias (default: snellius).
+        SNELLIUS_ACCOUNT   Slurm project account (default: uls22016).
+        PROJECT_START      First accounting date (default: 2026-03-01).
+        SBU_BUDGET         Project core-hour budget (default: 22,300,000).
 
     Closed accounting windows are cached. The current window is queried
     again; local snapshot metadata is read afresh on each invocation.
+    Legacy single-user caches and caches for another host/account are rebuilt.
+    Jobs returned in multiple weekly windows are counted once, using the record
+    from the latest window.
+    Snapshot metadata still comes only from INPUT_DIR, matched by run parameters;
+    it does not identify the user who produced a snapshot. Jobs without matching
+    local snapshots are included with empty snapshot columns.
 
 EXAMPLES
     Run from the repository root:
@@ -69,6 +76,7 @@ import csv
 import json
 import os
 import re
+import shlex
 import subprocess
 from datetime import date, timedelta
 
@@ -94,13 +102,14 @@ SNAP_CACHE_FNAME = "snap_cache.json"
 SBU_BUDGET = 22_300_000  # total core-hour budget for this project
 
 SNELLIUS_HOST = "snellius"  # SSH alias - configured in ~/.ssh/config
-SNELLIUS_USER = "yhe"
+SNELLIUS_ACCOUNT = "uls22016"  # Slurm project account (sbatch --account)
 PROJECT_START = date(2026, 3, 1)  # earliest date to query sacct from
 CHUNK_DAYS = 7  # sacct window size in days
 
 # Which job fields to query from sacct
 SACCT_FIELDS = [
     "JobID",
+    "User",
     "JobName",
     "State",
     "Start",
@@ -113,10 +122,11 @@ SACCT_FIELDS = [
 # Controls which fields appear in the per-job CSV table and in what order.
 # To add/remove columns or reorder, edit this list.
 # Job fields available (raw sacct + derived):
-#   JobID, JobName, State, Start, End, Elapsed, AllocCPUS, NNodes  <- raw sacct
+#   JobID, User, JobName, State, Start, End, Elapsed, AllocCPUS, NNodes <- raw sacct
 #   WallHours, Cores, CoreHours                                     <- derived
 _CSV_FIELDS = [
     "JobID",
+    "User",
     "JobName",
     "State",
     "Start",
@@ -168,7 +178,7 @@ def _elapsed_to_hours(elapsed: str) -> float:
     return days * 24 + h + m / 60 + s / 3600
 
 
-def _fetch_sacct_chunk(start: date, end: date) -> list:
+def _fetch_sacct_chunk(start: date, end: date) -> list | None:
     """Query sacct for one date window and return parsed job records.
 
     Runs via SSH if :data:`SNELLIUS_HOST` is set, locally otherwise
@@ -177,14 +187,15 @@ def _fetch_sacct_chunk(start: date, end: date) -> list:
     :param start: First day of the query window (inclusive).
     :param end: Last day of the query window (inclusive).
     :returns: List of job dicts with keys from :data:`SACCT_FIELDS`
-        plus ``WallHours``, ``Cores``, ``CoreHours``.
-    :rtype: list[dict]
+        plus ``WallHours``, ``Cores``, ``CoreHours``, or None on a failed query
+        so the failure is not cached as an empty window.
+    :rtype: list[dict] | None
     """
     fmt = ",".join(SACCT_FIELDS)
     s_str = start.strftime("%Y-%m-%dT00:00:00")
     e_str = end.strftime("%Y-%m-%dT23:59:59")
     sacct_cmd = (
-        f"sacct -u {SNELLIUS_USER} "
+        f"sacct --allusers --accounts={shlex.quote(SNELLIUS_ACCOUNT)} "
         f"--starttime={s_str} --endtime={e_str} "
         f"--format={fmt} --parsable2 --noheader"
     )
@@ -194,11 +205,11 @@ def _fetch_sacct_chunk(start: date, end: date) -> list:
         else ["bash", "-c", sacct_cmd]
     )
 
-    logger.info("sacct query {} → {}", start, end)
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    logger.info("sacct query account={} {} → {}", SNELLIUS_ACCOUNT, start, end)
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if result.returncode != 0:
         logger.error("sacct failed: {}", result.stderr.strip())
-        return []
+        return None
 
     rows = []
     for line in result.stdout.strip().splitlines():
@@ -241,18 +252,34 @@ def _chunk_dates(project_start: date, today: date) -> list:
 def _get_all_jobs(output_dir: str) -> list:
     """Fetch all sacct jobs since :data:`PROJECT_START` with disk caching.
 
-    Past chunks (end < today) are cached permanently — history does not change.
+    Past chunks (end < today) are cached permanently.
     The current chunk (includes today) is always re-queried.
+    Jobs spanning windows are deduplicated, keeping the latest window's record.
 
     :param output_dir: Directory where :data:`SACCT_CACHE_FNAME` is stored.
     :returns: List of all job dicts across all date chunks.
     :rtype: list[dict]
     """
+    if not SNELLIUS_ACCOUNT:
+        raise ValueError(
+            "Set SNELLIUS_ACCOUNT to the Slurm project account before querying."
+        )
+
     cache_path = os.path.join(output_dir, SACCT_CACHE_FNAME)
+    scope = {
+        "version": 2,
+        "host": SNELLIUS_HOST,
+        "account": SNELLIUS_ACCOUNT,
+        "fields": SACCT_FIELDS,
+    }
     cache: dict = {}
     if os.path.exists(cache_path):
         with open(cache_path) as f:
-            cache = json.load(f)
+            stored = json.load(f)
+        if stored.get("scope") == scope:
+            cache = stored.get("chunks", {})
+        else:
+            logger.info("Rebuilding sacct cache for all users in {}", SNELLIUS_ACCOUNT)
 
     today = date.today()
     all_jobs = []
@@ -260,10 +287,12 @@ def _get_all_jobs(output_dir: str) -> list:
 
     for start, end in _chunk_dates(PROJECT_START, today):
         key = f"{start}_{end}"
-        if key in cache:
+        if end < today and key in cache:
             all_jobs.extend(cache[key])
             continue
         rows = _fetch_sacct_chunk(start, end)
+        if rows is None:
+            continue
         all_jobs.extend(rows)
         if end < today:  # closed chunk - safe to cache permanently
             cache[key] = rows
@@ -271,10 +300,13 @@ def _get_all_jobs(output_dir: str) -> list:
 
     if cache_updated:
         with open(cache_path, "w") as f:
-            json.dump(cache, f, indent=2)
+            json.dump({"scope": scope, "chunks": cache}, f, indent=2)
         logger.info("sacct cache updated: {}", cache_path)
 
-    return all_jobs
+    # sacct returns jobs overlapping a window, so a long job can appear in
+    # multiple chunks. Later windows provide the most recent state/elapsed time.
+    # Include Start to distinguish jobs if Slurm eventually reuses a job ID.
+    return list({(job["JobID"], job["Start"]): job for job in all_jobs}.values())
 
 
 def _canonical_name(R: float, Mstar: float, Mbh: float, beta: float) -> str:
@@ -381,7 +413,7 @@ def _get_latest_snap_info(input_dir: str) -> dict:
 
 
 def _write_report(jobs: list, snaps: dict, output_file: str):
-    """Write progress CSV: per-job table + per-run summary.
+    """Write progress CSV: per-job table + per-user/run summary.
 
     Jobs that match a run directory (via :func:`_parse_job_name` +
     :func:`_canonical_name`) get snapshot columns filled in; unmatched jobs
@@ -395,7 +427,8 @@ def _write_report(jobs: list, snaps: dict, output_file: str):
     summary: dict = {}
     for job in jobs:
         name = job["JobName"]
-        if name not in summary:
+        run_key = (job["User"], name)
+        if run_key not in summary:
             # Try to attach latest snapshot info once per run name
             params = _parse_job_name(name)
             snap = {}
@@ -404,7 +437,7 @@ def _write_report(jobs: list, snaps: dict, output_file: str):
                     params["R"], params["Mstar"], params["Mbh"], params["beta"]
                 )
                 snap = snaps.get(key, {})
-            summary[name] = {
+            summary[run_key] = {
                 "Jobs": 0,
                 "CoreHours": 0.0,
                 "Running": False,
@@ -414,10 +447,10 @@ def _write_report(jobs: list, snaps: dict, output_file: str):
                 "Cycle": snap.get("cycle", ""),
                 "PointNum": snap.get("point_num", ""),
             }
-        summary[name]["Jobs"] += 1
-        summary[name]["CoreHours"] += job["CoreHours"]
+        summary[run_key]["Jobs"] += 1
+        summary[run_key]["CoreHours"] += job["CoreHours"]
         if job["State"] == "RUNNING":
-            summary[name]["Running"] = True
+            summary[run_key]["Running"] = True
 
     total_core_hours = sum(info["CoreHours"] for info in summary.values())
 
@@ -425,6 +458,7 @@ def _write_report(jobs: list, snaps: dict, output_file: str):
         # Summary table (main, parsable)
         _SUMMARY_FIELDS = [
             "RunName",
+            "User",
             "Jobs",
             "TotalCoreHours",
             "Running",
@@ -436,12 +470,13 @@ def _write_report(jobs: list, snaps: dict, output_file: str):
         ]
         writer = csv.DictWriter(f, fieldnames=_SUMMARY_FIELDS)
         writer.writeheader()
-        for name, info in sorted(
+        for (user, name), info in sorted(
             summary.items(), key=lambda x: x[1]["CoreHours"], reverse=True
         ):
             writer.writerow(
                 {
                     "RunName": name,
+                    "User": user,
                     "Jobs": info["Jobs"],
                     "TotalCoreHours": f"{info['CoreHours']:.1f}",
                     "Running": "yes" if info["Running"] else "no",
@@ -489,7 +524,7 @@ def _write_report(jobs: list, snaps: dict, output_file: str):
 These are Python constants, not command-line options:
 
 - `SNELLIUS_HOST`: `{SNELLIUS_HOST}` (SSH alias).
-- `SNELLIUS_USER`: `{SNELLIUS_USER}`.
+- `SNELLIUS_ACCOUNT`: `{SNELLIUS_ACCOUNT}` (Slurm project account; all users).
 - `PROJECT_START`: `{PROJECT_START}`.
 - `SBU_BUDGET`: `{SBU_BUDGET:,}` core hours.
 
@@ -501,9 +536,11 @@ Under OUTPUT_DIR:
 - `progress-monitor.log`: appended on every run.
 - `sacct_cache.json`: cached historical accounting windows.
 
-The current accounting window is queried again. Snapshot metadata is read
-afresh. Failed accounting queries are logged; they do not guarantee a nonzero
-exit status.
+The current accounting window is queried again. Legacy single-user caches
+and caches for another host/account are rebuilt. Snapshot metadata is read
+afresh from INPUT_DIR and matched by run parameters, independently of user.
+Failed accounting queries are logged and retried next time; they do not
+guarantee a nonzero exit status.
 
 ## Examples
 
@@ -526,11 +563,13 @@ def main(
 ):
     """Combine Snellius job accounting with local simulation progress in a CSV report.
 
-    Includes job states, wall/core hours, and per-run snapshot summaries.
+    Includes all users in SNELLIUS_ACCOUNT, with a User column in the per-job
+    details and summaries grouped by user and run name. Project totals include
+    every user's core hours. Snapshot information requires matching local data.
     Requires SSH access through the configured Snellius host alias.
 
     There are no run-selection or date-range CLI options. Configure
-    SNELLIUS_HOST, SNELLIUS_USER, PROJECT_START, and SBU_BUDGET in this script.
+    SNELLIUS_HOST, SNELLIUS_ACCOUNT, PROJECT_START, and SBU_BUDGET in this script.
     Run directories that do not match the naming convention are skipped.
     """
     os.makedirs(output_dir, exist_ok=True)
