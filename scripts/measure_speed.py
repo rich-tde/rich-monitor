@@ -1,4 +1,66 @@
-"""Parse Snellius benchmark logs and plot cell-updates per core per second."""
+"""Summarize RICH benchmark logs and plot simulation throughput.
+
+SYNOPSIS
+    python scripts/measure_speed.py [OPTIONS] [INPUT_FILES]...
+
+    Brackets mark optional items; ... means multiple inputs are accepted.
+
+DESCRIPTION
+    Parse Slurm output logs and plot throughput, wall time per step, cell
+    count, and timestep versus cycle. Print the partition, core count, and
+    mean/median cell updates per core per second for each processed log.
+    Skip plots already as recent as their input logs unless --force is set.
+
+ARGUMENTS
+    INPUT_FILES
+        Optional list of .out file paths or glob patterns. Quote a pattern
+        to let this script expand it, for example '/logs/*.out'. Logs must
+        contain --ntasks, --partition, and RICH step records.
+        With no inputs, use this single configured log:
+        /data2/yujiehe/rich-monitor/snellius-backup/logs/21732963_M05R047MBH1e5beta1.out
+
+OPTIONS
+    -o, --output-dir DIR
+        Existing directory for generated plots. It is NOT created by this
+        script. Default:
+        /data2/yujiehe/rich-monitor/snellius-logs/test_figs
+
+    -f, --force
+        Regenerate plots even if their modification times are at least as
+        recent as the input logs. Default: disabled.
+
+    -h, --help
+        Show command help and exit without reading logs or creating plots.
+
+    --install-completion / --show-completion
+        Install shell completion / print its configuration for the current
+        shell, then exit. These options are provided by Typer.
+
+EXIT STATUS
+    0   Processing finished. Unparseable logs and logs without usable steps
+        are silently skipped, so zero does not imply every input was plotted.
+    1   No input paths to process, or an unhandled runtime failure.
+    2   Command-line parsing error.
+
+FILES
+    DIR/<log-stem>.png
+        One four-panel figure for each processed .out file. Existing files
+        are replaced when the input is newer or --force is given. Logs with
+        identical basenames share an output path.
+
+EXAMPLES
+    Run from the repository root; create the destination first:
+        mkdir -p ./speed_figs
+
+    Analyze one log:
+        python scripts/measure_speed.py /logs/21732963_run.out -o ./speed_figs
+
+    Regenerate plots for all matching logs:
+        python scripts/measure_speed.py '/logs/*.out' -o ./speed_figs --force
+
+SEE ALSO
+    dispatch_diagnostics.py --help
+"""
 
 import glob
 import os
@@ -9,7 +71,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import typer
 
-app = typer.Typer()
+app = typer.Typer(
+    context_settings={"help_option_names": ["-h", "--help"]},
+    rich_markup_mode="markdown",
+)
 
 # --------------------------------- Constants -------------------------------- #
 
@@ -66,24 +131,61 @@ def rolave(data, window):
 # ----------------------------------- Main ----------------------------------- #
 
 
-@app.command()
+@app.command(
+    epilog=f"""
+## Defaults
+
+- Input: `{INPUT_FILE}`
+- Output directory: `{OUTPUT_DIR}` (must already exist).
+
+## Examples
+
+Run from the repository root.
+
+- **Create the destination:** `mkdir -p ./speed_figs`
+
+- **Analyze one log:**
+  `python scripts/measure_speed.py /logs/21732963_run.out -o ./speed_figs`
+
+- **Regenerate all matching plots:**
+  `python scripts/measure_speed.py '/logs/*.out' -o ./speed_figs --force`
+
+## Files
+
+One `<log-stem>.png` per processed log in the output directory. Identical
+input basenames share a figure path. Summaries are printed to the terminal.
+"""
+)
 def main(
     input_files: list[str] = typer.Argument(
-        help="Input RICH output file(s) or glob pattern(s)", default=[INPUT_FILE]
+        help=(
+            "Slurm .out files or glob patterns; accept multiple inputs. "
+            "Quote patterns to expand them in this script. "
+            "Omit to use the configured benchmark log."
+        ),
+        default=[INPUT_FILE],
     ),
     output_dir: str = typer.Option(
         OUTPUT_DIR,
         "--output-dir",
         "-o",
-        help="Output directory",
+        metavar="DIR",
+        help="Existing directory for one `<log-stem>.png` per input log; not created automatically.",
     ),
     force: bool = typer.Option(
         False,
         "--force",
         "-f",
-        help="",
+        help="Regenerate plots even when they are newer than or as recent as the input logs.",
     ),
 ):
+    """Plot throughput, wall time per step, cell count, and timestep versus cycle.
+
+    Logs must contain --ntasks, --partition, and RICH step records. Unparseable
+    logs and logs without usable steps are skipped. For each processed log,
+    print its partition, core count, and mean/median cell updates per core per
+    second. By default, skip plots already up to date with the input log.
+    """
     # Expand any glob patterns that the shell didn't expand (e.g. quoted globs)
     paths = []
     for pattern in input_files:

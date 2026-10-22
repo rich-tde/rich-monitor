@@ -1,5 +1,102 @@
-"""
-Automatic diagnostics for RICH TDE simulation snapshots.
+r"""Run physical and numerical diagnostics for a RICH TDE snapshot.
+
+SYNOPSIS
+    python scripts/diagnostics.py [OPTIONS] INPUT_FILE [OUTPUT_DIR]
+
+    Uppercase names are values to supply. Brackets mark optional items.
+
+DESCRIPTION
+    Load a snapshot and run all checks, or only those named with --check.
+    Write figures and log summaries to OUTPUT_DIR. Selected checks always
+    execute; existing figures are replaced. No overwrite flag is needed.
+    The time_evolution check additionally scans other snapshots in the run.
+
+ARGUMENTS
+    INPUT_FILE
+        Required path to a RICH HDF5 snapshot named snap_<N>.h5 or
+        snap_full_<N>.h5, where N is an integer snapshot number.
+        For slice, projection, pericenter_yz, and yz_frac_pericenter, the path
+        must contain R<Rstar>M<Mstar>BH<Mbh>beta<beta>, for example:
+        /data/R0.47M0.5BH100000beta1S60n1.5/snap_full_68.h5
+        Rstar is in solar radii; Mstar and Mbh are in solar masses.
+
+    OUTPUT_DIR
+        Optional output directory; created if absent. Default: ./ (the
+        current working directory). Follows INPUT_FILE when supplied.
+
+OPTIONS
+    -c, --check NAME
+        Run only the named check. Repeat to select more than one:
+        --check integrity --check resolution. Default: all nine checks.
+        Values are case-sensitive; see CHECKS. Checks run in their built-in
+        order, regardless of option order. Duplicate names run only once.
+
+    -h, --help
+        Show command help and exit without loading snapshots.
+
+    --install-completion / --show-completion
+        Install shell completion / print its configuration for the current
+        shell, then exit. These options are provided by Typer.
+
+CHECKS
+    integrity
+        Check particle-field lengths, unexpected all-zero fields, and NaN/Inf.
+        Issues are logged as warnings; they do not stop subsequent checks.
+    resolution
+        Plot sphere-equivalent cell-radius distributions by count and mass.
+    conservation
+        Log total mass and kinetic, thermal, and radiation energies.
+    compton
+        Log the mass fraction at T > 1e8 K and warn if it exceeds 5%.
+    time_evolution
+        Scan snap_*.h5 in INPUT_FILE's directory (including snap_full_*).
+        Cache missing scalar summaries and plot energy, dissipation, mass,
+        and cooling histories. Previously cached values are reused.
+    slice
+        Draw nine-panel xy mid-plane slices at small, middle, and big scales.
+    projection
+        Draw four-panel xy and xz column projections at middle and big scales.
+    pericenter_yz
+        Draw a nine-panel yz slice at the pericenter distance, x = r_p.
+    yz_frac_pericenter
+        Draw a nine-panel yz slice at the fixed x = 18 code-length probe,
+        labeled by its fraction of r_p (solar-radius length units).
+
+EXIT STATUS
+    0   Selected checks finished. Integrity/cooling warnings do not cause
+        a nonzero exit status; inspect diagnostics.log for findings.
+    2   Invalid command-line arguments, including an unknown check name.
+    Other nonzero values can result from unhandled runtime errors.
+
+FILES
+    OUTPUT_DIR/diagnostics.log              Append-only diagnostic log.
+    OUTPUT_DIR/figs/<series>/snapNNNN.png    Per-snapshot plots; overwritten.
+    OUTPUT_DIR/diagnostics_cache.json       Scalar cache for time_evolution.
+    OUTPUT_DIR/figs/time_evolution_*.png    Two run-wide history figures.
+
+NOTES
+    A slice-only run does not refresh the scalar cache. Rerunning
+    time_evolution also does not recompute existing cached entries.
+    Full and non-full snapshots with the same N share output names and
+    cache keys; use separate output directories to keep their results apart.
+
+EXAMPLES
+    Run from the repository root. Replace /data/RUN with a directory using
+    the parameter naming convention in ARGUMENTS.
+
+    Run every check for one snapshot:
+        python scripts/diagnostics.py /data/RUN/snap_68.h5 ./output
+
+    Regenerate only the xy nine-panel plots:
+        python scripts/diagnostics.py /data/RUN/snap_full_68.h5 ./output \
+            --check slice
+
+    Run two checks:
+        python scripts/diagnostics.py /data/RUN/snap_68.h5 ./output \
+            -c integrity -c resolution
+
+SEE ALSO
+    dispatch_diagnostics.py --help
 """
 
 import gc
@@ -7,6 +104,7 @@ import glob
 import json
 import os
 import re
+from typing import Annotated
 
 import matplotlib.colors as mcolors
 import matplotlib.patches as mpatches
@@ -19,7 +117,10 @@ from richio.plots import scalar_map
 
 import richio
 
-app = typer.Typer()
+app = typer.Typer(
+    context_settings={"help_option_names": ["-h", "--help"]},
+    rich_markup_mode="markdown",
+)
 
 # --------------------------------- Constants -------------------------------- #
 
@@ -72,7 +173,7 @@ def integrity_check(snap_path: str) -> list[str]:
     n_ref = None  # set once from first particle field
 
     snap = richio.load(snap_path)
-    for key in snap.keys():
+    for key in snap.keys():  # noqa: SIM118 - Snapshot exposes keys(), not key iteration.
         if key in _METADATA_KEYS:
             continue  # scalars / metadata - skip
         arr = snap[key]
@@ -818,45 +919,90 @@ def time_evolution_check(snap_path: str, output_dir: str):
 
 # ----------------------------------- Main ----------------------------------- #
 
-_ALL_CHECKS = (
-    "integrity",
-    "resolution",
-    "conservation",
-    "compton",
-    "time_evolution",
-    "slice",
-    "projection",
-    "pericenter_yz",
-    "yz_frac_pericenter",
+CHECK_DESCRIPTIONS = {
+    "integrity": "Check field lengths, unexpected all-zero fields, and NaN/Inf values; log issues.",
+    "resolution": "Plot cell-radius histograms weighted by cell count and mass.",
+    "conservation": "Log total mass and kinetic, thermal, and radiation energies.",
+    "compton": "Log the mass fraction above 1e8 K; warn when it exceeds 5%.",
+    "time_evolution": (
+        "Scan snapshots in the input file's directory, cache missing scalar summaries, "
+        "and redraw energy, dissipation, mass, and cooling histories. "
+        "Existing cached values are reused."
+    ),
+    "slice": "Plot nine-panel xy mid-plane slices at small, middle, and big scales.",
+    "projection": (
+        "Plot four-panel column projections in xy and xz at middle and big scales."
+    ),
+    "pericenter_yz": "Plot a nine-panel yz slice at the pericenter distance, x = r_p.",
+    "yz_frac_pericenter": (
+        f"Plot a nine-panel yz slice at the fixed probe x = {_YZ_SLICE_X:g} "
+        "code lengths (solar-radius units); label its fraction of r_p."
+    ),
+}
+_ALL_CHECKS = tuple(CHECK_DESCRIPTIONS)
+CHECK_HELP = "## Checks\n\nAccepted values for `--check NAME` (case-sensitive):\n\n" + "\n\n".join(
+    f"- **{name}**: {description}" for name, description in CHECK_DESCRIPTIONS.items()
 )
 
 
-@app.command()
+@app.command(
+    epilog=CHECK_HELP
+    + r"""
+
+## Examples
+
+Run from the repository root; replace `/data/RUN` with your run directory.
+
+- **Regenerate xy nine-panel plots for one snapshot:**
+  `python scripts/diagnostics.py /data/RUN/snap_full_68.h5 ./output
+  --check slice`
+
+- **Run two checks:**
+  `python scripts/diagnostics.py /data/RUN/snap_68.h5 ./output
+  -c integrity -c resolution`
+
+## Notes
+
+The input path must encode the run parameters for slice/projection checks.
+Full and non-full files with the same number share figure names and cache
+keys; use separate output directories to preserve both sets of results.
+
+The opening docstring in `scripts/diagnostics.py` contains the full reference,
+including parameter naming, output files, and exit status.
+"""
+)
 def main(
     input_file: str = typer.Argument(
-        help="Input .h5 snapshot.",
+        help=(
+            "RICH HDF5 snapshot: `snap_<N>.h5` or `snap_full_<N>.h5`. "
+            "For slice/projection checks, its path must contain `R<Rstar>M<Mstar>BH<Mbh>beta<beta>`."
+        ),
     ),
     output_dir: str = typer.Argument(
         default="./",
-        help="Output directory for figures and cache.",
+        help="Destination for figs/, diagnostics.log, and the time-evolution cache; created if absent.",
     ),
-    checks: list[str] | None = typer.Option(
-        None,
-        "--check",
-        "-c",
-        help=(
-            "Run only the specified check(s). Repeat for multiple. "
-            f"Choices: {', '.join(_ALL_CHECKS)}. "
-            "Default: run all."
+    checks: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--check",
+            "-c",
+            metavar="NAME",
+            help=(
+                "Run only the named check; repeat for multiple checks. "
+                "Default: all nine checks. See descriptions below."
+            ),
         ),
-    ),
+    ] = None,
 ):
-    """Run RICH TDE snapshot diagnostics.
+    """Analyze a snapshot and save diagnostic figures and logged summaries.
 
-    Examples:
-      python diagnostics.py snap.h5               # run all checks
-      python diagnostics.py snap.h5 -c integrity  # integrity only
-      python diagnostics.py snap.h5 -c time_evolution -c slice
+    Selected checks always run; existing figures are replaced without an
+    overwrite flag. Per-snapshot plots are saved as `figs/<series>/snapNNNN.png`.
+
+    The time_evolution check also reads other snapshots in the same directory,
+    fills diagnostics_cache.json, and redraws the two time_evolution figures.
+    It reuses cached scalar values rather than recomputing them.
     """
     if checks:
         unknown = set(checks) - set(_ALL_CHECKS)

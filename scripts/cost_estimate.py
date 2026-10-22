@@ -1,21 +1,53 @@
 #!/usr/bin/env python3
+"""Estimate wall time and Snellius core-hour cost for configured TDE runs.
+
+SYNOPSIS
+    python scripts/cost_estimate.py [-h | --help]
+
+DESCRIPTION
+    Compute estimates for the RUNS list defined in this file. Print per-run
+    step count, fallback time, timestep, cell count, wall time, and SBU,
+    followed by the total SBU. No files are read or written.
+
+ARGUMENTS
+    None. Simulation parameters are configured in this file.
+
+OPTIONS
+    -h, --help
+        Show command help and exit without calculating estimates.
+
+    No other command-line options are accepted.
+
+EXIT STATUS
+    0   Estimates printed, or help requested.
+    2   Unrecognized command-line option or positional argument.
+    Other nonzero values can result from unhandled runtime errors.
+
+NOTES
+    Edit these Python constants to change assumptions:
+        NCORES          Core count (default: 960).
+        SPEED           Cell updates/core/second (default: 2500).
+        TIMESTEP        Timestep in code units (default: 0.0010).
+        NFALLBACKTIME   Simulated fallback times (default: 2).
+
+    Each entry in RUNS supplies:
+        label           Display name.
+        Mbh, M          Black-hole and stellar masses, in solar masses.
+        R               Stellar radius, in solar radii.
+        beta            Penetration factor.
+        ncells          Estimated cell count including AMR refinement.
+        dt              Code-unit timestep; defaults to TIMESTEP.
+
+    Code units use one solar mass, one solar radius, and TSCALE = 1603 s.
+    Printed fallback times are in days, wall times in 30-day months, and
+    SBU in core hours. Cell counts and sustained speed are input estimates.
+
+EXAMPLES
+    Print estimates for all configured runs, from the repository root:
+        python scripts/cost_estimate.py
 """
-cost_estimate.py — Cost estimate for the TDE Compton-gray proposal runs.
 
-Everything is computed in code units (1 M_sun, 1 R_sun, TSCALE = 1603 s).
-TSCALE is chosen such that G = 1 in code units, so no CGS conversions are
-needed for the physics. Only the final wall-time/SBU output uses seconds.
-
-Per-run inputs (see RUNS list):
-  Mbh, M, R     -- in solar units
-  beta          -- penetration factor
-  ncells        -- AMR-inflated cell count; hand-set per run.
-                   (Future: derive from Mbh / resolution settings.)
-  dt_factor     -- timestep is dt = t_peri / dt_factor  (default 1000).
-
-SBU = core-hours on Snellius.
-"""
-
+import argparse
 import math
 from dataclasses import dataclass
 
@@ -45,7 +77,7 @@ class Run:
     R: float  # solar radii
     beta: float
     ncells: float  # AMR-inflated, hand-set
-    dt: float = TIMESTEP  # dt = t_peri / dt_factor
+    dt: float = TIMESTEP  # timestep in code units
 
     def t_peri(self) -> float:
         Rp = self.R * (self.Mbh / self.M) ** (1 / 3) / self.beta
@@ -121,4 +153,25 @@ def main():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Estimate wall time and Snellius core-hour cost for the configured TDE runs.",
+        epilog=(
+            "ARGUMENTS\n"
+            "  None. No simulation-parameter options are accepted.\n\n"
+            "CONFIGURATION\n"
+            "  Edit RUNS in this script to select simulations. Assumptions:\n"
+            f"    NCORES          {NCORES} cores\n"
+            f"    SPEED           {SPEED} cell updates/core/second\n"
+            f"    TIMESTEP        {TIMESTEP} code time units\n"
+            f"    NFALLBACKTIME   {NFALLBACKTIME} fallback times\n\n"
+            "OUTPUT\n"
+            "  Per-run step count, fallback time (days), timestep (code units),\n"
+            "  cell count, wall time (30-day months), and SBU (core hours).\n"
+            "  Prints a total SBU; no files are read or written.\n\n"
+            "EXAMPLES\n"
+            "  python scripts/cost_estimate.py"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.parse_args()
     main()

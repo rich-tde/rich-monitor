@@ -1,7 +1,68 @@
-"""
-Progress monitor of the RICH simulation runs.
+"""Report Slurm accounting and local snapshot progress for RICH runs.
 
-Queries sacct from Snellius (via SSH), caches results, and writes a CSV report.
+SYNOPSIS
+    python scripts/progress_monitor.py [OPTIONS] INPUT_DIR OUTPUT_DIR
+
+    Both positional arguments are required, in the order shown.
+
+DESCRIPTION
+    Query Slurm sacct on Snellius over SSH and combine the job records with
+    local snapshot metadata. Write a CSV containing job states, wall/core
+    hours, and per-run summaries. Read the highest-numbered .h5 snapshot for
+    each recognized run directory. Print progress messages and append a log.
+
+ARGUMENTS
+    INPUT_DIR
+        Required parent directory containing simulation run subdirectories;
+        not a single run directory or a snapshot filename.
+        Inspect immediate subdirectories whose names contain:
+        R<Rstar>M<Mstar>BH<Mbh>beta<beta>S<S>n<n>
+        For example: R0.47M0.5BH100000beta1S60n1.5ComptonHiResNewAMR
+        Rstar is in solar radii; Mstar and Mbh are in solar masses.
+        Skip unrecognized directories and runs without .h5 snapshots.
+
+    OUTPUT_DIR
+        Required destination for the report, accounting cache, and log.
+        Created if absent. Reuse it to retain cached accounting history.
+
+OPTIONS
+    -h, --help
+        Show command help and exit without querying SSH or reading snapshots.
+
+    --install-completion / --show-completion
+        Install shell completion / print its configuration for the current
+        shell, then exit. These options are provided by Typer.
+
+    No run-selection, date-range, host, or budget options are accepted.
+
+EXIT STATUS
+    0   Reporting finished. Failed accounting queries can be logged without
+        a nonzero exit; if no jobs are returned, progress.csv is not updated.
+    2   Command-line parsing error, such as a missing required directory.
+    Other nonzero values can result from unhandled runtime errors.
+
+FILES
+    OUTPUT_DIR/progress.csv             Report, replaced when jobs are found.
+    OUTPUT_DIR/progress-monitor.log     Append-only execution log.
+    OUTPUT_DIR/sacct_cache.json         Historical accounting-window cache.
+    ~/.ssh/config                      Resolves the configured Snellius alias.
+
+NOTES
+    Configuration is in Python constants, not command-line options:
+        SNELLIUS_HOST   SSH alias (default: snellius).
+        SNELLIUS_USER   Accounting user (default: yhe).
+        PROJECT_START   First accounting date (default: 2026-03-01).
+        SBU_BUDGET      Project core-hour budget (default: 22,300,000).
+
+    Closed accounting windows are cached. The current window is queried
+    again; local snapshot metadata is read afresh on each invocation.
+
+EXAMPLES
+    Run from the repository root:
+        python scripts/progress_monitor.py /disks/emrdata/YujieSnellius ./reports
+
+SEE ALSO
+    dispatch_diagnostics.py --help
 """
 
 import csv
@@ -18,7 +79,10 @@ from loguru import logger
 
 import richio
 
-app = typer.Typer()
+app = typer.Typer(
+    context_settings={"help_option_names": ["-h", "--help"]},
+    rich_markup_mode="markdown",
+)
 
 # --------------------------------- Constants -------------------------------- #
 
@@ -418,20 +482,56 @@ def _write_report(jobs: list, snaps: dict, output_file: str):
 # ----------------------------------- Main ----------------------------------- #
 
 
-@app.command()
+@app.command(
+    epilog=f"""
+## Configuration
+
+These are Python constants, not command-line options:
+
+- `SNELLIUS_HOST`: `{SNELLIUS_HOST}` (SSH alias).
+- `SNELLIUS_USER`: `{SNELLIUS_USER}`.
+- `PROJECT_START`: `{PROJECT_START}`.
+- `SBU_BUDGET`: `{SBU_BUDGET:,}` core hours.
+
+## Files
+
+Under OUTPUT_DIR:
+
+- `progress.csv`: replaced when accounting returns jobs.
+- `progress-monitor.log`: appended on every run.
+- `sacct_cache.json`: cached historical accounting windows.
+
+The current accounting window is queried again. Snapshot metadata is read
+afresh. Failed accounting queries are logged; they do not guarantee a nonzero
+exit status.
+
+## Examples
+
+Run from the repository root:
+
+- **Update the report:**
+  `python scripts/progress_monitor.py /disks/emrdata/YujieSnellius ./reports`
+"""
+)
 def main(
     input_dir: str = typer.Argument(
-        help="Directory containing simulation snapshots.",
+        help=(
+            "Parent of run directories named `R<Rstar>M<Mstar>BH<Mbh>beta<beta>S<S>n<n>...`. "
+            "Read the highest-numbered .h5 snapshot in each recognized immediate subdirectory."
+        ),
     ),
     output_dir: str = typer.Argument(
-        help="Output directory for report and cache.",
+        help="Destination for progress.csv, accounting cache, and log; created if absent.",
     ),
 ):
-    """Monitor progress of RICH simulation runs.
+    """Combine Snellius job accounting with local simulation progress in a CSV report.
 
-    Examples:
-    .. code-block:: shell
-      python progress_monitor.py /disks/emrdata/YujieSnellius/ /data1/yujiehe/snellius-logs/
+    Includes job states, wall/core hours, and per-run snapshot summaries.
+    Requires SSH access through the configured Snellius host alias.
+
+    There are no run-selection or date-range CLI options. Configure
+    SNELLIUS_HOST, SNELLIUS_USER, PROJECT_START, and SBU_BUDGET in this script.
+    Run directories that do not match the naming convention are skipped.
     """
     os.makedirs(output_dir, exist_ok=True)
     output_file = os.path.join(output_dir, OUTPUT_FNAME)
