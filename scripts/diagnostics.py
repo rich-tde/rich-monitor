@@ -124,8 +124,9 @@ def _nine_panel_fields(snap, input_file: str) -> dict:
     """Full-array fields for the shared 9-panel grid.
 
     Direct fields (density, pressure, temperature, dissipation, Erad) plus
-    derived diagnostics: speed, Mach number, fallback time in units of t_min
-    (see analysis/amrtimestep/orbital_energy.ipynb), and the Bernoulli
+    derived diagnostics: speed, Mach number, specific orbital energy
+    ``epsilon = 1/2 v^2 - Phi``, shown as
+    ``sgn(epsilon) log10(|epsilon / delta_eps|)``, and the Bernoulli
     parameter ``Be = 1/2 v^2 + P/rho + E_rad*4/3 - Phi`` (>0 => locally
     unbound, BH at origin) shown as ``sgn(Be) log10(|Be / delta_eps|)`` — the
     standard signed-log transform for a quantity that spans many orders of
@@ -165,10 +166,10 @@ def _nine_panel_fields(snap, input_file: str) -> dict:
     bernoulli_symlog = u.unyt_array(
         np.sign(be_ratio) * np.log10(np.abs(be_ratio)), "dimensionless"
     )
-
-    tfb = np.sqrt(-(np.pi**2) / 2 * (u.G * Mbh) ** 2 / soe**3)
-    tfb_min = (
-        np.pi / np.sqrt(2) * Rstar**1.5 / np.sqrt(u.G * Mstar) * np.sqrt(Mbh / Mstar)
+    soe_ratio = soe / delta_eps
+    # As above, numpy drops units on this genuinely dimensionless transform.
+    soe_symlog = u.unyt_array(
+        np.sign(soe_ratio) * np.log10(np.abs(soe_ratio)), "dimensionless"
     )
 
     return {
@@ -180,7 +181,7 @@ def _nine_panel_fields(snap, input_file: str) -> dict:
         "mach": v_mag / cs,  # velocity/velocity -> already dimensionless
         "erad": snap.Erad * snap.density,  # volumetric radiation energy [erg/cm^3]
         "bernoulli": bernoulli_symlog,
-        "tfb_ratio": tfb / tfb_min,  # time/time -> already dimensionless
+        "orbital_energy": soe_symlog,
         # raw components, for the velocity-panel streamlines (xy only)
         "Vx": snap.Vx,
         "Vy": snap.Vy,
@@ -240,18 +241,13 @@ _NINE_PANELS = [
         },
     ),
     (
-        "tfb_ratio",
-        "Fallback time",
+        "orbital_energy",
+        "Specific orbital energy",
         {
-            "label_latex": r"t_\mathrm{fb}",
-            "unit_latex": r"t_\mathrm{min}",
-            "cmap": "rainbow",
-            # Explicit range: tfb spans ~18 decades, so the automatic top-6
-            # clip would land far above the physically interesting band.
-            # Focused on the most-bound debris that sets the early fallback
-            # rate (0.1 - ~2 t_min); longer-tfb material saturates.
-            "vmin": -1.0,
-            "vmax": 0.3,
+            "label_latex": r"\mathrm{sgn}(\epsilon_\mathrm{orb})\log_{10}|\epsilon_\mathrm{orb}",
+            "unit_latex": r"\Delta\epsilon|",
+            "cmap": _BERNOULLI_CMAP,
+            "log_scale": False,
         },
     ),
 ]
@@ -277,11 +273,8 @@ def _plot_nine_panels(fields: dict, si, sxsp, sysp, axes):
         kw = dict(kw)
         log_scale = kw.pop("log_scale", True)
         data = fields[key][si].in_base("cgs")
-        if key == "bernoulli":
-            # Robust (percentile) symmetric range: already signed-log
-            # transformed, but a handful of cells right at r=0 still diverge
-            # (log|Be| -> +inf) and can otherwise wash out the whole panel.
-            vmax = 1.0
+        if key in {"bernoulli", "orbital_energy"}:
+            # Use the same fixed range for both signed-log energy ratios.
             kw.setdefault("vmin", -1.0)
             kw.setdefault("vmax", 1.0)
         elif key == "dissipation":
