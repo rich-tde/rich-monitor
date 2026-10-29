@@ -468,7 +468,8 @@ N_EXPECTED_PNGS_PER_SNAP = sum(len(v) for v in PNG_SERIES_PER_SNAP.values())
 def slice_check(snap, fields: dict, input_file: str, output_dir: str, snap_num: int):
     """Mid-plane 9-panel quantity grids (xy only), at each scale in _BOX_SCALES."""
     logger.info("Mid-plane slice plots...")
-    t_day = snap.time.to("day")
+    # Snapshot time metadata can be scalar or a one-element array.
+    t_day = snap.time.to("day").reshape(())
 
     for size, (kind, mult) in _BOX_SCALES.items():
         box, r = _scaled_box(input_file, kind, mult)
@@ -509,7 +510,7 @@ def projection_check(snap, input_file: str, output_dir: str, snap_num: int):
     dl [erg/s/cm^2].
     """
     logger.info("Projection plots...")
-    t_day = snap.time.to("day")
+    t_day = snap.time.to("day").reshape(())
 
     # Pre-multiply on the (much smaller) per-particle arrays so each 3-D
     # kd-tree index below yields the final field directly, instead of
@@ -664,7 +665,7 @@ def _yz_slice_check(snap, output_dir, snap_num, slice_x, rp, folder, title):
 
     Box: y=+-r_p, z=+-0.5 r_p (2:1 aspect, matching the resolution).
     """
-    t_day = snap.time.to("day")
+    t_day = snap.time.to("day").reshape(())
     half_y, half_z = rp, 0.5 * rp
     box = [-half_y.v, -half_z.v, half_y.v, half_z.v]
 
@@ -829,7 +830,7 @@ def _scalars_for_snap(snap_path: str) -> dict:
     fluff = _fluff_mask(snap)
 
     return {
-        "time_s": float(snap.time.to("s").v),
+        "time_s": float(snap.time.to("s").v.item()),
         "M_tot_g": float(mass.sum().to("g").v),
         "E_kin_erg": float(
             (0.5 * mass * (snap.Vx**2 + snap.Vy**2 + snap.Vz**2)).sum().to("erg").v

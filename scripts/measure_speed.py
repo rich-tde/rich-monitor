@@ -15,7 +15,10 @@ ARGUMENTS
     INPUT_FILES
         Optional list of .out file paths or glob patterns. Quote a pattern
         to let this script expand it, for example '/logs/*.out'. Logs must
-        contain --ntasks, --partition, and RICH step records.
+        contain --partition=NAME and RICH step records, plus either
+        --ntasks=N or both --nodes=N and --ntasks-per-node=N (fixed positive
+        integers). An explicit --ntasks takes precedence. As before, the
+        MPI task count is used as the core count for throughput normalization.
         With no inputs, use this single configured log:
         /data2/yujiehe/rich-monitor/snellius-backup/logs/21732963_M05R047MBH1e5beta1.out
 
@@ -90,10 +93,25 @@ NPLOT = 100
 def parse_file(path: Path) -> dict:
     text = path.read_text()
 
-    re_ntasks = re.compile(r"--ntasks=(\d+)")
+    re_ntasks = re.compile(r"--ntasks=(\d+)(?=\s|$)")
     re_part = re.compile(r"--partition=(\w+)")
-    ncores = int(re_ntasks.search(text).group(1))
-    partition = re_part.search(text).group(1)
+    ntasks = re_ntasks.search(text)
+    if ntasks:
+        ncores = int(ntasks.group(1))
+    else:
+        nodes = re.search(r"--nodes=(\d+)(?=\s|$)", text)
+        per_node = re.search(r"--ntasks-per-node=(\d+)(?=\s|$)", text)
+        if not nodes or not per_node:
+            raise ValueError(
+                "Missing --ntasks=N or fixed --nodes=N and --ntasks-per-node=N"
+            )
+        ncores = int(nodes.group(1)) * int(per_node.group(1))
+    if ncores <= 0:
+        raise ValueError("Task count must be positive")
+    partition_match = re_part.search(text)
+    if not partition_match:
+        raise ValueError("Missing --partition=NAME")
+    partition = partition_match.group(1)
 
     re_step = re.compile(r"Point num (\d+) dt (\S+) run time (\S+)\nCycle (\d+)")
     steps = re_step.findall(text)  # [(ncells, dt, run_time, cycle), ...]
@@ -181,8 +199,11 @@ def main(
 ):
     """Plot throughput, wall time per step, cell count, and timestep versus cycle.
 
-    Logs must contain --ntasks, --partition, and RICH step records. Unparseable
-    logs and logs without usable steps are skipped. For each processed log,
+    Logs must contain --partition=NAME and RICH step records, plus --ntasks=N
+    or both --nodes=N and --ntasks-per-node=N (fixed positive integers).
+    Explicit --ntasks takes precedence; the MPI task count is used as the core
+    count. Unparseable logs and logs without usable steps are silently skipped.
+    For each processed log,
     print its partition, core count, and mean/median cell updates per core per
     second. By default, skip plots already up to date with the input log.
     """
@@ -215,11 +236,9 @@ def main(
         try:
             rec = parse_file(p)
         except Exception:
-            # typer.echo(f"Skipping {p.name}: {e}", err=True)
             continue
 
         if len(rec["cycle"]) == 0:
-            # typer.echo(f"Skipping {p.name}: no output found", err=True)
             continue
 
         if print_header is True:
