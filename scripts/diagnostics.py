@@ -226,13 +226,13 @@ def _nine_panel_fields(snap, input_file: str) -> dict:
 
     Direct fields (density, pressure, temperature, dissipation, Erad) plus
     derived diagnostics: speed, Mach number, specific orbital energy
-    ``epsilon = 1/2 v^2 - Phi``, shown as
-    ``sgn(epsilon) log10(|epsilon / delta_eps|)``, and the Bernoulli
-    parameter ``Be = 1/2 v^2 + P/rho + E_rad*4/3 - Phi`` (>0 => locally
-    unbound, BH at origin) shown as ``sgn(Be) log10(|Be / delta_eps|)`` — the
-    standard signed-log transform for a quantity that spans many orders of
-    magnitude on both sides of zero — where ``delta_eps = G Mbh Rstar / Rt^2``
-    is the frozen-in specific-energy spread of tidally disrupted debris.
+    ``epsilon = 1/2 v^2 - Phi`` and the Bernoulli parameter
+    ``Be = 1/2 v^2 + e_int + P/rho + E_rad*4/3 - Phi`` (gas plus radiation
+    specific enthalpy; >0 => locally unbound, BH at origin), both returned as
+    the ratio to ``delta_eps = G Mbh Rstar / Rt^2``, the frozen-in
+    specific-energy spread of tidally disrupted debris. Most debris has
+    ``|ratio| < 1``, so the ratio is plotted with a SymLogNorm rather than
+    ``sgn(x) log10|x|``, which flips sign for ``|x| < 1``.
 
     The potential is Paczynski-Wiita, ``Phi = G Mbh / (r - r_g)`` with
     ``r_g = 2 G Mbh / c^2``, which mimics the GR innermost-stable-orbit
@@ -258,19 +258,12 @@ def _nine_panel_fields(snap, input_file: str) -> dict:
     dr[dr <= 0] = np.nan  # inside the horizon: undefined, not "extremely bound"
     phi = u.G * Mbh / dr
     soe = 0.5 * v_mag**2 - phi  # specific orbital energy (no pressure term)
-    bernoulli = 0.5 * v_mag**2 + snap.pressure / snap.density + snap.Erad * 4.0 / 3.0 - phi
-    # Signed log of the (dimensionless) Bernoulli / energy-spread ratio. The
-    # .to("dimensionless") both validates dimensionlessness and simplifies the
-    # mixed code+cgs units; numpy's log10/sign then return a bare ndarray, so
-    # re-tag the genuinely-dimensionless result for the uniform plotting path.
-    be_ratio = (bernoulli / delta_eps).to("dimensionless")
-    bernoulli_symlog = u.unyt_array(
-        np.sign(be_ratio) * np.log10(np.abs(be_ratio)), "dimensionless"
-    )
-    soe_ratio = soe / delta_eps
-    # As above, numpy drops units on this genuinely dimensionless transform.
-    soe_symlog = u.unyt_array(
-        np.sign(soe_ratio) * np.log10(np.abs(soe_ratio)), "dimensionless"
+    bernoulli = (
+        0.5 * v_mag**2
+        + snap.internal_energy
+        + snap.pressure / snap.density
+        + snap.Erad * 4.0 / 3.0
+        - phi
     )
 
     return {
@@ -281,8 +274,8 @@ def _nine_panel_fields(snap, input_file: str) -> dict:
         "dissipation": snap.dissipation,
         "mach": v_mag / cs,  # velocity/velocity -> already dimensionless
         "erad": snap.Erad * snap.density,  # volumetric radiation energy [erg/cm^3]
-        "bernoulli": bernoulli_symlog,
-        "orbital_energy": soe_symlog,
+        "bernoulli": bernoulli / delta_eps,  # same dimension -> dimensionless
+        "orbital_energy": soe / delta_eps,
         # raw components, for the velocity-panel streamlines (xy only)
         "Vx": snap.Vx,
         "Vy": snap.Vy,
@@ -335,8 +328,8 @@ _NINE_PANELS = [
         "bernoulli",
         "Bernoulli parameter",
         {
-            "label_latex": r"\mathrm{sgn}(\mathrm{Be})\log_{10}|\mathrm{Be}",
-            "unit_latex": r"\Delta\epsilon|",
+            "label_latex": r"\mathrm{Be}",
+            "unit_latex": r"\Delta\epsilon",
             "cmap": _BERNOULLI_CMAP,
             "log_scale": False,
         },
@@ -345,8 +338,8 @@ _NINE_PANELS = [
         "orbital_energy",
         "Specific orbital energy",
         {
-            "label_latex": r"\mathrm{sgn}(\epsilon_\mathrm{orb})\log_{10}|\epsilon_\mathrm{orb}",
-            "unit_latex": r"\Delta\epsilon|",
+            "label_latex": r"\epsilon_\mathrm{orb}",
+            "unit_latex": r"\Delta\epsilon",
             "cmap": _BERNOULLI_CMAP,
             "log_scale": False,
         },
@@ -375,9 +368,12 @@ def _plot_nine_panels(fields: dict, si, sxsp, sysp, axes):
         log_scale = kw.pop("log_scale", True)
         data = fields[key][si].in_base("cgs")
         if key in {"bernoulli", "orbital_energy"}:
-            # Use the same fixed range for both signed-log energy ratios.
-            kw.setdefault("vmin", -1.0)
-            kw.setdefault("vmax", 1.0)
+            # Same fixed symlog range for both energy ratios: decades
+            # 0.1-10 on each side, linear through zero so the sign is kept.
+            kw.setdefault(
+                "norm",
+                mcolors.SymLogNorm(linthresh=0.1, vmin=-10.0, vmax=10.0, base=10),
+            )
         elif key == "dissipation":
             vmin, vmax = _top_orders_range(data)
             if vmin is not None:
